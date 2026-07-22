@@ -1,0 +1,19 @@
+[project]
+name = "ngaw3_kuehnetal27"
+version = "0.1.0"
+dependencies = [
+    "numpyro",
+    "equinox",
+    "pyproj",
+]
+
+[project.optional-dependencies]
+jax-cpu = ["jax", "jaxlib"]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+gmm_model = ["data/*.csv"]
