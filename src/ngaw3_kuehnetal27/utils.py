@@ -308,6 +308,24 @@ def package_data_path(filename: str) -> Path:
     """
     return resources.files("ngaw3_kuehnetal27") / "data" / filename
 
+def results_data_path(filename: str) -> Path:
+    """
+    Path to a results file shipped inside the ngaw3_kuehnetal27 package
+    (ngaw3_kuehnetal27/results/) -- the reference fitted-coefficient
+    JSON, so anyone who `pip install`s the package can load it for
+    prediction without needing the full repo checkout.
+
+    `filename` can include subdirectories, e.g. "eas/results_wus_main.json".
+
+    Like `package_data_path`, this only resolves files inside
+    src/ngaw3_kuehnetal27/ -- it can't be pointed at a repo-root
+    directory (results/ has to live inside the package to be shipped
+    by pip at all).
+    """
+    path = resources.files("ngaw3_kuehnetal27") / "results"
+    for part in filename.split("/"):
+        path = path / part
+    return path
 
 # ---------------------------------------------------------------------------
 # GP kernels
