@@ -3,6 +3,7 @@ SVI fitting helper, usable for any model/guide pair (EAS, PSA, ...).
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from dataclasses import dataclass
@@ -236,15 +237,15 @@ def write_svi_results(
             "not auto-created, to avoid silently writing into an unintended folder."
         )
 
-    with open(os.path.join(results_dir, f"results_orig_{filestem}.json"), "w") as f:
+    with gzip.open(os.path.join(results_dir, f"results_orig_{filestem}.json.gz"), "wt", encoding="utf-8") as f:
         json.dump(convert_to_json_serializable(svi_params), f, indent=2)
 
     site_values = resolve_svi_site_values(model, guide, svi_params, data_dict, seed=seed)
     if frequencies is not None:
         site_values["frequency"] = frequencies
 
-    with open(os.path.join(results_dir, f"results_{filestem}.json"), "w") as f:
+    with gzip.open(os.path.join(results_dir, f"results_{filestem}.json.gz"), "wt", encoding="utf-8") as f:
         json.dump(convert_to_json_serializable(site_values), f, indent=2)
 
-    with open(os.path.join(results_dir, f"data_{filestem}.json"), "w") as f:
+    with gzip.open(os.path.join(results_dir, f"data_{filestem}.json.gz"), "wt", encoding="utf-8") as f:
         json.dump(convert_to_json_serializable(data_dict), f, indent=2)
