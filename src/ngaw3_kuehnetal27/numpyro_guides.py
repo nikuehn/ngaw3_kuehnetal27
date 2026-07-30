@@ -42,7 +42,7 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               calc_dWS=False, save_f_nl=False,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
-              sharing_config=None, estimate_kapp=None):
+              sharing_config=None, estimate_kappa=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
