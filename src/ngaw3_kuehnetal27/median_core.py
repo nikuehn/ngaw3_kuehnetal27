@@ -162,6 +162,7 @@ def calculate_median_core(
     deltaB_attn: Optional[Array] = None,   # (n_records, n_freq) or None
     c_basin: Optional[Array] = None,       # (n_records, n_freq) or None
     c_subregion_adj: Optional[Array] = None,  # (n_records, n_freq) or None
+    kappa_adj: Optional[Array] = None,   # (n_records,) or None -- per-record kappa term (population + deviation, or deviation only)
 ) -> Tuple[Array, Array]:
     """
     Compute ln(median) for a set of records within one dataset.
@@ -212,6 +213,7 @@ def calculate_median_core(
     deltaB_attn = zero if deltaB_attn is None else deltaB_attn
     c_basin = zero if c_basin is None else c_basin
     c_subregion_adj = zero if c_subregion_adj is None else c_subregion_adj
+    kappa_adj = 0.0 if kappa_adj is None else kappa_adj[:, jnp.newaxis]
 
     # --- magnitude scaling ramp ---
     f_flt = smooth_trilinear_ramp(evt.M_model, 1.0, 4.5, 5.5)
@@ -235,6 +237,7 @@ def calculate_median_core(
         + deltaB
         + deltaS
     )
+    median = median - kappa_adj * F[jnp.newaxis, :]
 
     # --- magnitude and geometric spreading ---
     if func_gs_scaling == "stafford":
@@ -306,6 +309,7 @@ def calculate_median_training(
     deltaB_attn: Array,     # (n_eq, n_freq)
     c_basin: Array,         # (n_basin, n_freq)
     c_subregion: Array,     # (n_subregion, n_freq) -- zeros(1, n_freq) for global
+    kappa_adj: Optional[Array] = None,   # (n_rec,), already resolved in the numpyro model
 ) -> Tuple[Array, Array]:
     """
     Fitting-time wrapper for ONE dataset (call once for WUS, once for
@@ -345,6 +349,7 @@ def calculate_median_training(
         deltaB_attn=deltaB_attn[idx.eq_id],
         c_basin=c_basin[idx.basin_id],
         c_subregion_adj=c_subregion[idx.subregion_id],
+        kappa_adj=kappa_adj,
     )
 
 

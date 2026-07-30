@@ -49,7 +49,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               calc_dWS=False, save_f_nl=False,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
-              sharing_config=None):
+              sharing_config=None, estimate_kapp=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -174,7 +174,9 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     c_nft_1_gl, c_nft_2_gl = c_nft_1, c_nft_2
 
     # --- c_0, c_gs1: parametric-vs-spline switch, applied consistently ---
-    c_0, c_0_gl = sample_c0_coefficient(spline_basis, ln_F, F, sharing_config, parametric=c0_parametric)
+    c_0, c_0_gl, c_0_kappa_star = sample_c0_coefficient(
+        spline_basis, ln_F, F, sharing_config, parametric=c0_parametric,
+    )
     c_gs1, c_gs1_gl = sample_cgs1_coefficient(spline_basis, ln_F, sharing_config, parametric=cgs1_parametric)
 
     # --- remaining spline coefficients, via the generic sampler ---
@@ -251,6 +253,47 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     with numpyro.plate("plate_region", n_subregion, dim=-1):
         c_subregion = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_subregion))
 
+    # --- kappa random effect (WUS only) ---
+    estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
+    estimate_station_kappa = estimate_kappa in ("station", "hierarchical")
+    estimate_any_kappa = estimate_region_kappa or estimate_station_kappa
+
+    if estimate_any_kappa:
+        if not c0_parametric:
+            c_0_kappa_star = numpyro.sample("c_0_kappa_star", dist.HalfNormal(0.3))
+        # else: c_0_kappa_star already sampled inside sample_c0_coefficient above
+
+        if estimate_region_kappa:
+            sigma_ln_kappa_region = numpyro.sample("sigma_ln_kappa_region", dist.Exponential(10.0))
+            with numpyro.plate("plate_region", n_subregion, dim=-1):
+                ln_kappa_region_raw = numpyro.sample("ln_kappa_region_raw", dist.Normal(0, 1))
+            m_region = numpyro.deterministic("m_region", jnp.exp(ln_kappa_region_raw * sigma_ln_kappa_region))
+            m_region_id = m_region[subregion_id]
+        else:
+            m_region_id = 1.0
+
+        if estimate_station_kappa:
+            sigma_ln_kappa_station = numpyro.sample("sigma_ln_kappa_station", dist.Exponential(10.0))
+            with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
+                ln_kappa_station_raw = numpyro.sample("ln_kappa_station_raw", dist.Normal(0, 1))
+            m_station = numpyro.deterministic("m_station", jnp.exp(ln_kappa_station_raw * sigma_ln_kappa_station))
+            m_station_id = m_station[stat_id]
+        else:
+            m_station_id = 1.0
+
+        if c0_parametric:
+            # c_0 already contains -c_0_kappa_star * F; this is a zero-mean deviation on top
+            kappa_adj = numpyro.deterministic(
+                "kappa_adj", c_0_kappa_star * (m_region_id * m_station_id - 1.0)
+            )
+        else:
+            # c_0 (spline) has no kappa term at all -- this IS the whole thing
+            kappa_adj = numpyro.deterministic(
+                "kappa_adj", c_0_kappa_star * m_region_id * m_station_id
+            )
+    else:
+        kappa_adj = None
+
     # --- basin term (WUS only) ---
     c_basin_sample = jnp.stack([
         make_spline_coeff(spline_basis, f"c_b_{i}", mu_loc=0, mu_scale=0.5)
@@ -311,6 +354,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         nl_model_dict=nl_model_dict,
         deltaB=deltaB, deltaS=deltaS, deltaB_attn=deltaB_attn,
         c_basin=c_basin, c_subregion=c_subregion,
+        kappa_adj=kappa_adj,
     )
 
     if save_f_nl:

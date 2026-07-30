@@ -42,7 +42,7 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               calc_dWS=False, save_f_nl=False,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
-              sharing_config=None):
+              sharing_config=None, estimate_kapp=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -218,6 +218,41 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ),
             ),
         )
+
+    estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
+    estimate_station_kappa = estimate_kappa in ("station", "hierarchical")
+    estimate_any_kappa = estimate_region_kappa or estimate_station_kappa
+
+    if estimate_any_kappa:
+        if not c0_parametric:
+            numpyro.sample("c_0_kappa_star", dist.TransformedDistribution(
+                dist.Delta(v=numpyro.param("loc_log_c_0_kappa_star", jnp.log(0.1))),
+                transforms=dist.transforms.ExpTransform(),
+            ))
+
+        if estimate_region_kappa:
+            numpyro.sample("sigma_ln_kappa_region", dist.TransformedDistribution(
+                dist.Delta(v=numpyro.param("loc_log_sigma_ln_kappa_region", -2.0)),
+                transforms=dist.transforms.ExpTransform(),
+            ))
+            with numpyro.plate("plate_region", n_subregion, dim=-1):
+                numpyro.sample("ln_kappa_region_raw", dist.Normal(
+                    loc=numpyro.param("loc_ln_kappa_region_raw", jnp.zeros(n_subregion)),
+                    scale=numpyro.param("scale_ln_kappa_region_raw", 0.2 * jnp.ones(n_subregion),
+                                        constraint=dist.constraints.positive),
+                ))
+
+        if estimate_station_kappa:
+            numpyro.sample("sigma_ln_kappa_station", dist.TransformedDistribution(
+                dist.Delta(v=numpyro.param("loc_log_sigma_ln_kappa_station", -2.0)),
+                transforms=dist.transforms.ExpTransform(),
+            ))
+            with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
+                numpyro.sample("ln_kappa_station_raw", dist.Normal(
+                    loc=numpyro.param("loc_ln_kappa_station_raw", jnp.zeros(n_stat)),
+                    scale=numpyro.param("scale_ln_kappa_station_raw", 0.2 * jnp.ones(n_stat),
+                                        constraint=dist.constraints.positive),
+                ))
 
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         numpyro.sample("nu_rec", dist.TransformedDistribution(

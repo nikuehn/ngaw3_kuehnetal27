@@ -157,16 +157,20 @@ def sample_c0_coefficient(
     *,
     parametric: bool = False,
     gl_suffix: str = "_gl",
-) -> Tuple[Array, Array]:
+) -> Tuple[Array, Array, Array | None]:
     """
-    c_0 (the constant term): dataset_local by default, with a
-    parametric-vs-spline switch. `parametric` applies identically to
-    both WUS and global (each gets its own independent parameters,
-    same functional form).
+    ...same docstring...
 
-    Parametric form: c_0_ic + logistic_hinge(ln_F, slope1, slope2, fb,
-    delta) - c_0_kappa_star * F.
+    Returns
+    -------
+    (value_wus, value_gl, kappa_star_wus)
+        `kappa_star_wus` is the WUS-side `c_0_kappa_star` sample when
+        `parametric=True`, else `None`. (The global-side kappa_star, if
+        dataset_local, is sampled but not returned -- nothing downstream
+        currently needs it.)
     """
+    kappa_star_wus = {"value": None}
+
     if parametric:
         def make_sample(name):
             ic = numpyro.sample(f"{name}_ic", dist.Normal(0, 2.0))
@@ -175,6 +179,8 @@ def sample_c0_coefficient(
             fb = numpyro.sample(f"{name}_fb", dist.Normal(0, 1))
             delta = numpyro.sample(f"{name}_delta", dist.HalfNormal(0.2))
             kappa_star = numpyro.sample(f"{name}_kappa_star", dist.HalfNormal(0.3))
+            if name == "c_0":
+                kappa_star_wus["value"] = kappa_star
             return numpyro.deterministic(
                 name,
                 ic + logistic_hinge(ln_F, slope1, slope2, fb, delta) - kappa_star * F,
@@ -183,9 +189,10 @@ def sample_c0_coefficient(
         def make_sample(name):
             return make_spline_coeff(spline_basis, name, mu_loc=-5.0, mu_scale=5.0)
 
-    return resolve_shared_coefficient(
+    value_wus, value_gl = resolve_shared_coefficient(
         "c_0", make_sample, sharing_config["c_0"], gl_suffix=gl_suffix,
     )
+    return value_wus, value_gl, kappa_star_wus["value"]
 
 
 def sample_cgs1_coefficient(
