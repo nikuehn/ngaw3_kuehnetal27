@@ -243,6 +243,9 @@ def compute_deltaWS(
     deltaB_attn_key = f"deltaB_attn{gl_suffix}"
     deltaB_attn = (jnp.asarray(site_values[deltaB_attn_key])
                    if deltaB_attn_key in site_values else jnp.zeros_like(deltaB))
+    kappa_adj = (jnp.asarray(site_values["kappa_adj"])
+                 if dataset_region == "wus" and "kappa_adj" in site_values
+                 else None)
 
     if dataset_region == "global":
         c_basin = jnp.zeros((1, len(F)))
@@ -260,6 +263,7 @@ def compute_deltaWS(
         nl_model_dict=data_dict["nl_model_dict"],
         deltaB=deltaB, deltaS=deltaS, deltaB_attn=deltaB_attn,
         c_basin=c_basin, c_subregion=c_subregion,
+        kappa_adj=kappa_adj,
     )
 
     Y = jnp.asarray(Y)
@@ -333,6 +337,10 @@ def scenario_predict(
         c_subregion_table = jnp.asarray(site_values["c_region"])
         basin_id = jnp.asarray(df_scenarios["basin_id"].values, dtype=int)
         subregion_id = jnp.asarray(df_scenarios["subregion_id"].values, dtype=int)
+
+    kappa_adj_table = (jnp.asarray(site_values["kappa_region_table"])
+                       if dataset_region == "wus" and "kappa_region_table" in site_values
+                       else None)
 
     R = jnp.asarray(df_scenarios["R"].values)
     Rx = jnp.asarray(df_scenarios["Rx"].values)

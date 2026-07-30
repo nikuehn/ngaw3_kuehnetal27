@@ -396,6 +396,7 @@ def predict_median_categorical(
     basin_id: Optional[Array] = None,           # (n_scenarios,) -- required if c_basin_table given
     c_subregion_table: Optional[Array] = None,  # (n_subregion, n_freq)
     subregion_id: Optional[Array] = None,       # (n_scenarios,) -- required if c_subregion_table given
+    kappa_adj_table: Optional[Array] = None,  # (n_subregion,) -- per-subregion kappa deviation
 ) -> Tuple[Array, Array]:
     """
     Like `predict_median`, but for scenarios that need to select a
@@ -419,6 +420,7 @@ def predict_median_categorical(
 
     c_basin = c_basin_table[basin_id] if c_basin_table is not None else None
     c_subregion_adj = c_subregion_table[subregion_id] if c_subregion_table is not None else None
+    kappa_adj = kappa_adj_table[subregion_id] if kappa_adj_table is not None else None
 
     return calculate_median_core(
         R, Rx, Ry0, F, R_scaled, dist_cell,
@@ -427,4 +429,5 @@ def predict_median_categorical(
         nl_model_dict=nl_model_dict,
         c_basin=c_basin,
         c_subregion_adj=c_subregion_adj,
+        kappa_adj=kappa_adj,
     )

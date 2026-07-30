@@ -269,6 +269,11 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ln_kappa_region_raw = numpyro.sample("ln_kappa_region_raw", dist.Normal(0, 1))
             m_region = numpyro.deterministic("m_region", jnp.exp(ln_kappa_region_raw * sigma_ln_kappa_region))
             m_region_id = m_region[subregion_id]
+
+            if c0_parametric:
+                kappa_region_table = numpyro.deterministic("kappa_region_table", c_0_kappa_star * (m_region - 1.0))
+            else:
+                kappa_region_table = numpyro.deterministic("kappa_region_table", c_0_kappa_star * m_region)
         else:
             m_region_id = 1.0
 
@@ -278,6 +283,11 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ln_kappa_station_raw = numpyro.sample("ln_kappa_station_raw", dist.Normal(0, 1))
             m_station = numpyro.deterministic("m_station", jnp.exp(ln_kappa_station_raw * sigma_ln_kappa_station))
             m_station_id = m_station[stat_id]
+
+            if c0_parametric:
+                kappa_station_table = numpyro.deterministic("kappa_station_table", c_0_kappa_star * (m_station - 1.0))
+            else:
+                kappa_station_table = numpyro.deterministic("kappa_station_table", c_0_kappa_star * m_station)
         else:
             m_station_id = 1.0
 
