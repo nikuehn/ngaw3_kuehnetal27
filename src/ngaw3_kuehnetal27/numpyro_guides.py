@@ -206,18 +206,6 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     # --- geology subregion random effect (WUS only) ---
     make_spline_coeff_guide(spline_basis, "sigma_region", monotonic=None, init_mu=-0.7)
-    with numpyro.plate("plate_region", n_subregion, dim=-1):
-        numpyro.sample(
-            "c_region",
-            dist.MultivariateNormal(
-                loc=numpyro.param("loc_c_region", jnp.zeros((n_subregion, n_freq))),
-                scale_tril=numpyro.param(
-                    "scale_tril_c_region",
-                    jnp.tile(jnp.eye(n_freq) * 0.2, (n_subregion, 1, 1)),
-                    constraint=dist.constraints.lower_cholesky,
-                ),
-            ),
-        )
 
     estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
     estimate_station_kappa = estimate_kappa in ("station", "hierarchical")
@@ -259,6 +247,13 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             dist.Delta(v=numpyro.param("loc_log_nu_rec", 6.0 * jnp.ones(n_freq))),
             transforms=dist.transforms.ExpTransform(),
         ))
+
+        with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+            numpyro.sample("c_region_raw", dist.Normal(
+                loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
+                scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
+                                    constraint=dist.constraints.positive),
+            ))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
             numpyro.sample("deltaS", dist.Normal(

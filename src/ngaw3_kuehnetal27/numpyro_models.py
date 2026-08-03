@@ -250,8 +250,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
                                          positive=True, transform="softplus")
     L_subregion = sigma_subregion[..., None] * L_freq
-    with numpyro.plate("plate_region", n_subregion, dim=-1):
-        c_subregion = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_subregion))
+    # with numpyro.plate("plate_region", n_subregion, dim=-1):
+    #     c_subregion = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_subregion))
 
     # --- kappa random effect (WUS only) ---
     estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
@@ -314,6 +314,9 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         nu_rec = numpyro.sample("nu_rec", dist.Gamma(2, 0.1))
 
+        with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+            c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
+
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
             deltaS = numpyro.sample("deltaS", dist.TransformedDistribution(
                 dist.Normal(0, 1),
@@ -332,6 +335,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ))
             else:
                 deltaB_attn = jnp.zeros((n_eq, n_freq))
+
+    c_subregion = numpyro.deterministic("c_region", mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T)
 
     # --- monotonicity regularization on magnitude scaling (WUS only) ---
     numpyro.factor("reg_c_m2", jnp.where(c_m2 > c_m1,
