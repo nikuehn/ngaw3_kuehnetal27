@@ -122,42 +122,6 @@ def resolve_svi_site_values(
     *,
     seed: int = 1701,
 ) -> Dict[str, Any]:
-    """
-    Resolve a fitted SVI run into a flat dict of named values: every
-    model-side `numpyro.deterministic` site (the actual coefficients --
-    e.g. the spline-transformed c_m1, c_0, ...), plus every latent
-    sample site's fitted value.
-
-    For point-mass (Delta) guide sites, the sampled value already *is*
-    the fitted estimate. For stochastic guide sites -- mean-field Normal
-    (random effects, and M_model if magnitude uncertainty is on) or
-    MultivariateNormal (the subregion term) -- the raw sampled value is
-    just one draw, so this additionally overwrites the site with its
-    fitted location (`loc_{site}`), and attaches the fitted spread
-    (`scale_{site}` or `scale_tril_{site}`) alongside it.
-
-    Which sites are stochastic is detected purely from `svi_params` --
-    any `loc_{name}` with a matching `scale_{name}` or
-    `scale_tril_{name}` -- so this adapts automatically to whichever of
-    deltaB_attn / M_model / the global (`_gl`) variants are actually
-    present for a given model configuration, with no hardcoded site list.
-
-    Parameters
-    ----------
-    model, guide : Callable
-    svi_params : dict
-        `SVIFitResult.params` from `run_svi`.
-    data_dict : dict
-        Same data_dict the model/guide were fit with.
-    seed : int
-        RNG seed for tracing (only relevant to sites not overwritten by
-        the loc_/scale_ substitution below, so has no practical effect
-        on the returned values -- kept for reproducibility).
-
-    Returns
-    -------
-    Dict[str, Any]
-    """
     rng_key = jax.random.key(seed)
 
     guide_trace = handlers.trace(
@@ -168,17 +132,12 @@ def resolve_svi_site_values(
         name: site["value"] for name, site in guide_trace.items() if site["type"] == "sample"
     }
 
-    model_trace = handlers.trace(
-        handlers.substitute(model, data=site_values)
-    ).get_trace(**data_dict)
-
-    deterministics = {
-        name: site["value"] for name, site in model_trace.items() if site["type"] == "deterministic"
-    }
-    site_values.update(deterministics)
-
-    # Overwrite stochastic sites with their fitted location, and attach
-    # their fitted spread -- detected generically, not hardcoded.
+    # Swap in each stochastic site's fitted location (and attach its
+    # fitted spread) BEFORE recomputing model-side deterministics --
+    # detected generically from svi_params, exactly as before. This
+    # ordering is what makes m_region/kappa_adj/c_region (anything
+    # downstream of a random-effect sample) get built from the
+    # location/mode rather than one arbitrary draw.
     for param_name, value in svi_params.items():
         if not param_name.startswith("loc_"):
             continue
@@ -191,6 +150,15 @@ def resolve_svi_site_values(
         elif scale_tril_key in svi_params:
             site_values[site_name] = value
             site_values[scale_tril_key] = svi_params[scale_tril_key]
+
+    model_trace = handlers.trace(
+        handlers.substitute(model, data=site_values)
+    ).get_trace(**data_dict)
+
+    deterministics = {
+        name: site["value"] for name, site in model_trace.items() if site["type"] == "deterministic"
+    }
+    site_values.update(deterministics)
 
     return site_values
 
