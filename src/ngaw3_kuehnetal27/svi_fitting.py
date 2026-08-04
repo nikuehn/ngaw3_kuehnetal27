@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import numpyro
 import optax
