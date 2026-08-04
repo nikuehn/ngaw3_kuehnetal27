@@ -160,6 +160,23 @@ def resolve_svi_site_values(
     }
     site_values.update(deterministics)
 
+    
+    n_freq = len(data_dict['F'])
+    if 'L_freq' not in data_dict or data_dict['L_freq'] is None:
+        L_freq = jnp.eye(n_freq)
+    else:
+        L_freq = jnp.asarray(data_dict['L_freq'])
+
+    L_subregion = site_values["sigma_region"][..., None] * L_freq
+    var_c_region = (L_subregion**2) @ (svi_params["scale_c_region_raw"]**2).T
+    scale_c_region = jnp.sqrt(var_c_region).T
+    site_values["scale_c_region"] = scale_c_region
+
+    if "scale_ln_kappa_region_raw" in svi_params:
+        site_values["scale_ln_kappa_region"] = site_values["sigma_ln_kappa_region"] * svi_params["scale_ln_kappa_region_raw"]
+    if "scale_ln_kappa_station_raw" in svi_params:
+        site_values["scale_ln_kappa_station"] = site_values["sigma_ln_kappa_station"] * svi_params["scale_ln_kappa_station_raw"]
+
     return site_values
 
 
