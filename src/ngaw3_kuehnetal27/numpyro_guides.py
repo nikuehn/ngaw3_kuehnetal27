@@ -263,13 +263,13 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             ))
 
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            numpyro.sample("deltaB", dist.Normal(
+            numpyro.sample("deltaB_raw", dist.Normal(
                 loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
                 scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                      constraint=dist.constraints.positive),
             ))
             if attn_eq:
-                numpyro.sample("deltaB_attn", dist.Normal(
+                numpyro.sample("deltaB_attn_raw", dist.Normal(
                     loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
                     scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                          constraint=dist.constraints.positive),
