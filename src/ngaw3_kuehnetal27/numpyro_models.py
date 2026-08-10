@@ -323,7 +323,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
             deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
             if attn_eq:
-                deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1)))
+                deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
 
     deltaS = numpyro.deterministic("deltaS", deltaS_raw * phi_s2s[vs_measured_id])
     deltaB = numpyro.deterministic("deltaB", deltaB_raw * tau)
