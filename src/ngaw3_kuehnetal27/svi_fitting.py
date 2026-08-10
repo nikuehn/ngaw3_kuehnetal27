@@ -16,6 +16,8 @@ import numpyro
 import optax
 from numpyro import handlers
 from numpyro.infer import SVI, Trace_ELBO
+from ngaw3_kuehnetal27.utils import smooth_trilinear_ramp_repar
+from ngaw3_kuehnetal27.median_core import ModelConstants
 
 
 @dataclass
@@ -166,7 +168,7 @@ def resolve_svi_site_values(
     tau_0 = site_values["tau_0"]
     tau_1 = site_values["tau_1"]
     tau = jnp.exp(smooth_trilinear_ramp_repar(M_model[:, jnp.newaxis],
-                                               tau_0, tau_1, mb1, mb2, delta=0.2))
+                                               tau_0, tau_1, ModelConstants().mb1, ModelConstants().mb2, delta=0.2))
     site_values["scale_deltaB"] = tau * site_values["scale_deltaB_raw"]
 
     if "scale_deltaB_attn_raw" in svi_params:
