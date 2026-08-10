@@ -172,7 +172,7 @@ def resolve_svi_site_values(
     site_values["scale_deltaB"] = tau * site_values["scale_deltaB_raw"]
 
     if "scale_deltaB_attn_raw" in svi_params:
-        site_values["scale_deltaB_attn"] = svi_params["tau_attn"] * svi_params["scale_deltaB_attn_raw"]
+        site_values["scale_deltaB_attn"] = site_values["tau_attn"] * svi_params["scale_deltaB_attn_raw"]
 
     vs_measured_id = data_dict['X_stat'][:,2].astype("int")
     phi_s2s = jnp.stack([site_values["phi_s2s_meas"], site_values["phi_s2s_est"]])[vs_measured_id]
