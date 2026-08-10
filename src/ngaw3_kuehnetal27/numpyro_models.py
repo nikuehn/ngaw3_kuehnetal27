@@ -318,24 +318,20 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            deltaS = numpyro.sample("deltaS", dist.TransformedDistribution(
-                dist.Normal(0, 1),
-                dist.transforms.AffineTransform(0, phi_s2s[vs_measured_id]),
-            ))
+            deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
 
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            deltaB = numpyro.sample("deltaB", dist.TransformedDistribution(
-                dist.Normal(0, 1),
-                dist.transforms.AffineTransform(0, tau),
-            ))
+            deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
             if attn_eq:
-                deltaB_attn = numpyro.sample("deltaB_attn", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, tau_attn),
-                ))
-            else:
-                deltaB_attn = jnp.zeros((n_eq, n_freq))
+                deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1)))
 
+    deltaS = numpyro.deterministic("deltaS", deltaS_raw * phi_s2s[vs_measured_id])
+    deltaB = numpyro.deterministic("deltaB", deltaB_raw * tau)
+    if attn_eq:
+        deltaB_attn = numpyro.deterministic("deltaB_attn", deltaB_attn_raw * tau_attn)
+    else:
+        deltaB_attn = jnp.zeros((n_eq, n_freq))
+            
     c_subregion = numpyro.deterministic("c_region", mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T)
 
     # --- monotonicity regularization on magnitude scaling (WUS only) ---
@@ -458,23 +454,19 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 tau_attn_gl = numpyro.sample("tau_attn_gl", dist.HalfNormal(0.5))
 
             with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                deltaS_gl = numpyro.sample("deltaS_gl", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, phi_s2s_gl),
-                ))
+                deltaS_raw_gl = numpyro.sample("deltaS_raw_gl", dist.Normal(0, 1))
 
             with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                deltaB_gl = numpyro.sample("deltaB_gl", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, tau_gl),
-                ))
+                deltaB_raw_gl = numpyro.sample("deltaB_raw_gl", dist.Normal(0, 1))
                 if attn_eq:
-                    deltaB_attn_gl = numpyro.sample("deltaB_attn_gl", dist.TransformedDistribution(
-                        dist.Normal(0, 1),
-                        dist.transforms.AffineTransform(0, tau_attn_gl),
-                    ))
-                else:
-                    deltaB_attn_gl = jnp.zeros((n_eq_gl, n_freq))
+                    deltaB_attn_raw_gl = numpyro.sample("deltaB_attn_raw_gl", dist.Normal(0, 1))
+
+        deltaS_gl = numpyro.deterministic("deltaS_gl", deltaS_raw_gl * phi_s2s_gl)
+        deltaB_gl = numpyro.deterministic("deltaB_gl", deltaB_raw_gl * tau_gl)
+        if attn_eq:
+            deltaB_attn_gl = numpyro.deterministic("deltaB_attn_gl", deltaB_attn_raw_gl * tau_attn_gl)
+        else:
+            deltaB_attn_gl = jnp.zeros((n_eq_gl, n_freq))
 
         c_basin_gl = jnp.zeros((1, n_freq))
         c_subregion_gl = jnp.zeros((1, n_freq))
