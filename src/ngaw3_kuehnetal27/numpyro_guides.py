@@ -256,22 +256,22 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             ))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            numpyro.sample("deltaS", dist.Normal(
-                loc=numpyro.param("loc_deltaS", jnp.zeros((n_stat, n_freq))),
-                scale=numpyro.param("scale_deltaS", 0.2 * jnp.ones((n_stat, n_freq)),
+            numpyro.sample("deltaS_raw", dist.Normal(
+                loc=numpyro.param("loc_deltaS_raw", jnp.zeros((n_stat, n_freq))),
+                scale=numpyro.param("scale_deltaS_raw", 0.2 * jnp.ones((n_stat, n_freq)),
                                      constraint=dist.constraints.positive),
             ))
 
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
             numpyro.sample("deltaB", dist.Normal(
-                loc=numpyro.param("loc_deltaB", jnp.zeros((n_eq, n_freq))),
-                scale=numpyro.param("scale_deltaB", 0.2 * jnp.ones((n_eq, n_freq)),
+                loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
+                scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                      constraint=dist.constraints.positive),
             ))
             if attn_eq:
                 numpyro.sample("deltaB_attn", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_attn", jnp.zeros((n_eq, n_freq))),
-                    scale=numpyro.param("scale_deltaB_attn", 0.2 * jnp.ones((n_eq, n_freq)),
+                    loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
+                    scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
 
@@ -311,22 +311,22 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ))
 
             with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                numpyro.sample("deltaS_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaS_gl", jnp.zeros((n_stat_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaS_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
+                numpyro.sample("deltaS_raw_gl", dist.Normal(
+                    loc=numpyro.param("loc_deltaS_raw_gl", jnp.zeros((n_stat_gl, n_freq))),
+                    scale=numpyro.param("scale_deltaS_raw_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
 
             with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                numpyro.sample("deltaB_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_gl", jnp.zeros((n_eq_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaB_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                numpyro.sample("deltaB_raw_gl", dist.Normal(
+                    loc=numpyro.param("loc_deltaB_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                    scale=numpyro.param("scale_deltaB_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
                 if attn_eq:
-                    numpyro.sample("deltaB_attn_gl", dist.Normal(
-                        loc=numpyro.param("loc_deltaB_attn_gl", jnp.zeros((n_eq_gl, n_freq))),
-                        scale=numpyro.param("scale_deltaB_attn_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                    numpyro.sample("deltaB_attn_raw_gl", dist.Normal(
+                        loc=numpyro.param("loc_deltaB_attn_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                        scale=numpyro.param("scale_deltaB_attn_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
                                              constraint=dist.constraints.positive),
                     ))
 
