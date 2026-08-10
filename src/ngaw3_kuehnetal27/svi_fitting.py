@@ -161,14 +161,29 @@ def resolve_svi_site_values(
     }
     site_values.update(deterministics)
 
-    
+    # uncertainty in random effects
+    M_model = jnp.array(data_dict["X_eq"][:,0])
+    tau_0 = site_values["tau_0"]
+    tau_1 = site_values["tau_1"]
+    tau = jnp.exp(smooth_trilinear_ramp_repar(M_model[:, jnp.newaxis],
+                                               tau_0, tau_1, mb1, mb2, delta=0.2))
+    site_values["scale_deltaB"] = tau * site_values["scale_deltaB_raw"]
+
+    if "scale_deltaB_attn_raw" in svi_params:
+        site_values["scale_deltaB_attn"] = svi_params["tau_attn"] * svi_params["scale_deltaB_attn_raw"]
+
+    vs_measured_id = data_dict['X_stat'][:,2].astype("int")
+    phi_s2s = jnp.stack([site_values["phi_s2s_meas"], site_values["phi_s2s_est"]])[vs_measured_id]
+    site_values["scale_deltaS"] = phi_s2s * site_values["scale_deltaS_raw"]
+   
+    # uncertainty or regional and kappa values
     n_freq = len(data_dict['F'])
     if 'L_freq' not in data_dict or data_dict['L_freq'] is None:
         L_freq = jnp.eye(n_freq)
     else:
         L_freq = jnp.asarray(data_dict['L_freq'])
 
-    if "sigma_region" in data_dict:
+    if "sigma_region" in site_values:
         L_subregion = site_values["sigma_region"][..., None] * L_freq
         var_c_region = (L_subregion**2) @ (svi_params["scale_c_region_raw"]**2).T
         scale_c_region = jnp.sqrt(var_c_region).T
