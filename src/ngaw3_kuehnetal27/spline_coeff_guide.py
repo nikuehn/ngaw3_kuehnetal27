@@ -64,7 +64,7 @@ def make_spline_coeff_guide(spline_basis, name, monotonic=None,
         )
     else:
         numpyro.sample(
-            f"spline_coefs_{name}",
+            f"spline_coefs_raw_{name}",
             dist.Delta(
                 v=numpyro.param(
                     f"loc_spline_coefs_{name}",

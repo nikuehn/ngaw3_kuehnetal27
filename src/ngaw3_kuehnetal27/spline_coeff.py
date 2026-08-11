@@ -50,20 +50,21 @@ def make_spline_coeff(spline_basis, name, mu_loc=0, mu_scale=2,
     if monotonic == "increasing":
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",
-            dist.HalfNormal(sigma_spline * jnp.ones(n_spline_coefs)),
+            dist.HalfNormal(jnp.ones(n_spline_coefs)),
         )
-        spline_coefs = jnp.cumsum(spline_coefs_raw)
+        spline_coefs = jnp.cumsum(sigma_spline * spline_coefs_raw)
     elif monotonic == "decreasing":
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",
-            dist.HalfNormal(sigma_spline * jnp.ones(n_spline_coefs)),
+            dist.HalfNormal(jnp.ones(n_spline_coefs)),
         )
-        spline_coefs = -jnp.cumsum(spline_coefs_raw)
+        spline_coefs = -jnp.cumsum(sigma_spline * spline_coefs_raw)
     else:
-        spline_coefs = numpyro.sample(
-            f"spline_coefs_{name}",
-            dist.Normal(jnp.zeros(n_spline_coefs), sigma_spline * jnp.ones(n_spline_coefs)),
+        spline_coefs_raw = numpyro.sample(
+            f"spline_coefs_raw_{name}",
+            dist.Normal(jnp.zeros(n_spline_coefs), jnp.ones(n_spline_coefs)),
         )
+        spline_coefs = sigma_spline * spline_coefs_raw
 
     spline_term = mu + jnp.dot(spline_basis, spline_coefs)
 
