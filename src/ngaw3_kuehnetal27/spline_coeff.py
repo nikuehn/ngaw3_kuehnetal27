@@ -62,7 +62,7 @@ def make_spline_coeff(spline_basis, name, mu_loc=0, mu_scale=2,
     else:
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",
-            dist.Normal(jnp.zeros(n_spline_coefs), jnp.ones(n_spline_coefs)),
+            dist.ZeroSumNormal(1.0, event_shape=(n_spline_coefs,)),
         )
         spline_coefs = sigma_spline * spline_coefs_raw
 

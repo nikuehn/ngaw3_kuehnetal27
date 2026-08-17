@@ -69,6 +69,7 @@ def make_spline_coeff_guide(spline_basis, name, monotonic=None,
                 v=numpyro.param(
                     f"loc_spline_coefs_{name}",
                     init_value=jnp.zeros(n_spline_coefs),
+                    constraint=dist.constraints.zero_sum(1),
                 )
             ),
         )
