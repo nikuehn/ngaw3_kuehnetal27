@@ -156,7 +156,7 @@ def calculate_median_core(
     const: ModelConstants,
     *,
     func_gs_scaling: str = "stafford",
-    nl_model_dict: dict,
+    nl_model_dict: Optional[dict],
     deltaB: Optional[Array] = None,        # (n_records, n_freq) or None
     deltaS: Optional[Array] = None,        # (n_records, n_freq) or None
     deltaB_attn: Optional[Array] = None,   # (n_records, n_freq) or None
@@ -190,9 +190,12 @@ def calculate_median_core(
     coef : Coefficients
     const : ModelConstants
     func_gs_scaling : {'stafford', 'other'}
-    nl_model_dict : dict
+    nl_model_dict : dict or None
         {'model': 'mahdi'|'hashash_new', plus that model's interpolated
-        coefficient dicts}.
+        coefficient dicts}. Pass None to disable nonlinear site
+        amplification entirely (f_nl = 0) -- e.g. for EAS-to-PSA RVT
+        conversion, where the nonlinear correction is instead applied
+        separately in PSA space using a PSA-specific NL model.
     deltaB, deltaS, deltaB_attn, c_basin, c_subregion_adj : Array,
     shape (n_records, n_freq), optional
         Random effects / categorical adjustments, already gathered to
@@ -272,18 +275,21 @@ def calculate_median_core(
     median = median + deltaB_attn * R_scaled[:, jnp.newaxis]
 
     # --- nonlinear site amplification ---
-    nl_model_name = nl_model_dict["model"]
-    if nl_model_name == "mahdi":
-        f_nl = compute_ln_amplification_mahdi(
-            jnp.exp(median), site.VS_stat, evt.M_model,
-            nl_model_dict["interp_params"], nl_model_dict["interp_nonlin"],
-        )
-    elif nl_model_name == "hashash_new":
-        f_nl = compute_ln_amplification_hashash_new(
-            jnp.exp(median), site.VS_stat, nl_model_dict["interp_hashash"],
-        )
+    if nl_model_dict is None:
+        f_nl = jnp.zeros_like(median)
     else:
-        raise ValueError(f"Unknown nl_model: {nl_model_name!r}")
+        nl_model_name = nl_model_dict["model"]
+        if nl_model_name == "mahdi":
+            f_nl = compute_ln_amplification_mahdi(
+                jnp.exp(median), site.VS_stat, evt.M_model,
+                nl_model_dict["interp_params"], nl_model_dict["interp_nonlin"],
+            )
+        elif nl_model_name == "hashash_new":
+            f_nl = compute_ln_amplification_hashash_new(
+                jnp.exp(median), site.VS_stat, nl_model_dict["interp_hashash"],
+            )
+        else:
+            raise ValueError(f"Unknown nl_model: {nl_model_name!r}")
 
     # --- vs30 scaling ---
     # coef.c_vs must already be resolved to (n_records, n_freq) by
@@ -303,7 +309,7 @@ def calculate_median_training(
     const: ModelConstants,
     *,
     func_gs_scaling: str = "stafford",
-    nl_model_dict: dict,
+    nl_model_dict: Optional[dict],
     deltaB: Array,          # (n_eq, n_freq)
     deltaS: Array,          # (n_stat, n_freq)
     deltaB_attn: Array,     # (n_eq, n_freq)
@@ -361,7 +367,7 @@ def predict_median(
     const: ModelConstants,
     *,
     func_gs_scaling: str = "stafford",
-    nl_model_dict: dict,
+    nl_model_dict: Optional[dict],
     dist_cell: Optional[Array] = None,
 ) -> Tuple[Array, Array]:
     """
@@ -390,7 +396,7 @@ def predict_median_categorical(
     const: ModelConstants,
     *,
     func_gs_scaling: str = "stafford",
-    nl_model_dict: dict,
+    nl_model_dict: Optional[dict],
     dist_cell: Optional[Array] = None,
     c_basin_table: Optional[Array] = None,      # (n_basin, n_freq)
     basin_id: Optional[Array] = None,           # (n_scenarios,) -- required if c_basin_table given

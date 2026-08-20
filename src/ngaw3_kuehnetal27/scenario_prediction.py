@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from jax import random
 
 from ngaw3_kuehnetal27.median_core import (
     Coefficients,
@@ -23,7 +24,6 @@ from ngaw3_kuehnetal27.median_core import (
     calculate_median_training,
     predict_median_categorical,
 )
-from ngaw3_kuehnetal27.model_inputs import extract_model_arrays
 
 # Defaults for every scenario variable. Names follow the GMM's own
 # convention (M, R, Rx, Ry0, Z for Ztor, VS, ...) rather than the NN
@@ -42,6 +42,25 @@ DEFAULTS: Dict[str, Any] = {
     "subregion_id": 0,   # geology subregion -- WUS only, ignored for dataset_region='global'
     "basin_id": 1,       # WUS only, ignored for dataset_region='global'
     "vsmeas_id": 0,      # 0 = measured, 1 = estimated (WUS); only category 0 exists for global
+}
+
+# Bounds for random scenario sampling. Only variables that get sampled;
+# anything else falls back to DEFAULTS or FOOTWALL_GEOMETRY.
+SAMPLE_BOUNDS: Dict[str, tuple] = {
+    "M": (4.0, 8.0),
+    "R": (0.0, 300.0),
+    "Z": (0.0, 25.0),
+    "VS": (200.0, 1100.0),
+}
+
+# Footwall-only geometry -- hanging-wall sites are excluded (harder to
+# sample consistently, and poorly constrained); add a separate
+# hanging-wall term on top later if needed.
+FOOTWALL_GEOMETRY: Dict[str, float] = {
+    "Dip": 90.0,
+    "FW": 60.0,
+    "Rx": -20.0,
+    "Ry0": 0.0,
 }
 
 
@@ -269,11 +288,74 @@ def compute_deltaWS(
     Y = jnp.asarray(Y)
     return jnp.where(jnp.isnan(Y), jnp.nan, Y - median)
 
+def _predict_from_dataframe(
+    df_scenarios: pd.DataFrame,
+    site_values: Dict[str, Any],
+    F: np.ndarray,
+    nl_model_dict: Optional[dict],
+    dataset_region: str,
+    func_gs_scaling: str,
+    const: ModelConstants,
+) -> jnp.ndarray:
+    """
+    Shared core of `scenario_predict` / `sample_scenarios`: given a
+    fully-populated `df_scenarios` (every DEFAULTS column present),
+    compute ln_median. No grid-building or sampling here.
+    """
+    coef = coefficients_from_site_values(site_values, dataset_region=dataset_region)
+
+    if dataset_region == "global":
+        c_basin_table = jnp.zeros((1, len(F)))
+        c_subregion_table = jnp.zeros((1, len(F)))
+        basin_id = jnp.zeros(len(df_scenarios), dtype=int)
+        subregion_id = jnp.zeros(len(df_scenarios), dtype=int)
+    else:
+        c_basin_table = jnp.asarray(site_values["c_basin"])
+        c_subregion_table = jnp.asarray(site_values["c_region"])
+        basin_id = jnp.asarray(df_scenarios["basin_id"].values, dtype=int)
+        subregion_id = jnp.asarray(df_scenarios["subregion_id"].values, dtype=int)
+
+    kappa_adj_table = (jnp.asarray(site_values["kappa_region_table"])
+                       if dataset_region == "wus" and "kappa_region_table" in site_values
+                       else None)
+
+    R = jnp.asarray(df_scenarios["R"].values)
+    Rx = jnp.asarray(df_scenarios["Rx"].values)
+    Ry0 = jnp.asarray(df_scenarios["Ry0"].values)
+    R_scaled = R / 100.0
+
+    evt = EventParams(
+        M_model=jnp.asarray(df_scenarios["M"].values),
+        Dip_eq=jnp.asarray(df_scenarios["Dip"].values),
+        FW_eq=jnp.asarray(df_scenarios["FW"].values),
+        Zt_eq=jnp.asarray(df_scenarios["Z"].values),
+        Zt_eq_scaled=jnp.asarray(df_scenarios["Z"].values) / 10.0,
+        Fnm_eq=jnp.asarray(df_scenarios["Fnm"].values),
+        Frev_eq=jnp.asarray(df_scenarios["Frev"].values),
+    )
+    VS = jnp.asarray(df_scenarios["VS"].values)
+    site = SiteParams(
+        VS_stat=VS,
+        lnVS=jnp.log(VS) - jnp.log(800.0),
+        vs_measured_id=jnp.asarray(df_scenarios["vsmeas_id"].values, dtype=int),
+    )
+
+    ln_median, _ = predict_median_categorical(
+        R, Rx, Ry0, jnp.asarray(F), R_scaled,
+        evt, site, coef, const,
+        func_gs_scaling=func_gs_scaling,
+        nl_model_dict=nl_model_dict,
+        c_basin_table=c_basin_table, basin_id=basin_id,
+        c_subregion_table=c_subregion_table, subregion_id=subregion_id,
+        kappa_adj_table=kappa_adj_table,
+    )
+    return ln_median
+
 
 def scenario_predict(
     site_values: Dict[str, Any],
     F: np.ndarray,
-    nl_model_dict: dict,
+    nl_model_dict: Optional[dict],
     dataset_region: str = "wus",
     func_gs_scaling: str = "stafford",
     const: Optional[ModelConstants] = None,
@@ -325,54 +407,109 @@ def scenario_predict(
         if col not in df_scenarios.columns:
             df_scenarios[col] = default
 
-    coef = coefficients_from_site_values(site_values, dataset_region=dataset_region)
-
-    if dataset_region == "global":
-        c_basin_table = jnp.zeros((1, len(F)))
-        c_subregion_table = jnp.zeros((1, len(F)))
-        basin_id = jnp.zeros(len(df_scenarios), dtype=int)
-        subregion_id = jnp.zeros(len(df_scenarios), dtype=int)
-    else:
-        c_basin_table = jnp.asarray(site_values["c_basin"])
-        c_subregion_table = jnp.asarray(site_values["c_region"])
-        basin_id = jnp.asarray(df_scenarios["basin_id"].values, dtype=int)
-        subregion_id = jnp.asarray(df_scenarios["subregion_id"].values, dtype=int)
-
-    kappa_adj_table = (jnp.asarray(site_values["kappa_region_table"])
-                       if dataset_region == "wus" and "kappa_region_table" in site_values
-                       else None)
-
-    R = jnp.asarray(df_scenarios["R"].values)
-    Rx = jnp.asarray(df_scenarios["Rx"].values)
-    Ry0 = jnp.asarray(df_scenarios["Ry0"].values)
-    R_scaled = R / 100.0
-
-    evt = EventParams(
-        M_model=jnp.asarray(df_scenarios["M"].values),
-        Dip_eq=jnp.asarray(df_scenarios["Dip"].values),
-        FW_eq=jnp.asarray(df_scenarios["FW"].values),
-        Zt_eq=jnp.asarray(df_scenarios["Z"].values),
-        Zt_eq_scaled=jnp.asarray(df_scenarios["Z"].values) / 10.0,
-        Fnm_eq=jnp.asarray(df_scenarios["Fnm"].values),
-        Frev_eq=jnp.asarray(df_scenarios["Frev"].values),
-    )
-    VS = jnp.asarray(df_scenarios["VS"].values)
-    site = SiteParams(
-        VS_stat=VS,
-        lnVS=jnp.log(VS) - jnp.log(800.0),
-        vs_measured_id=jnp.asarray(df_scenarios["vsmeas_id"].values, dtype=int),
-    )
-
-    ln_median, _ = predict_median_categorical(
-        R, Rx, Ry0, jnp.asarray(F), R_scaled,
-        evt, site, coef, const,
-        func_gs_scaling=func_gs_scaling,
-        nl_model_dict=nl_model_dict,
-        c_basin_table=c_basin_table, basin_id=basin_id,
-        c_subregion_table=c_subregion_table, subregion_id=subregion_id,
+    ln_median = _predict_from_dataframe(
+        df_scenarios, site_values, F, nl_model_dict,
+        dataset_region, func_gs_scaling, const,
     )
 
     freq_cols = {f"f{f:.3f}": np.asarray(ln_median)[:, i] for i, f in enumerate(F)}
     df_pred = pd.concat([df_scenarios, pd.DataFrame(freq_cols)], axis=1)
 
     return df_pred, ln_median
+
+
+def sample_scenarios(
+    site_values: Dict[str, Any],
+    F: np.ndarray,
+    nl_model_dict: Optional[dict],
+    n_sample: int = 100_000,
+    seed: int = 1701,
+    dataset_region: str = "wus",
+    func_gs_scaling: str = "stafford",
+    const: Optional[ModelConstants] = None,
+    bounds: Optional[Dict[str, tuple]] = None,
+    fixed: Optional[Dict[str, Any]] = None,
+    fault_type_logits: Optional[jnp.ndarray] = None,
+):
+    """
+    Randomly sample `n_sample` scenario predictor combinations and
+    compute the GMM median EAS for each -- the random-sampling
+    counterpart to `scenario_predict`'s Cartesian grid.
+
+    Sampled: M, R, Z (Ztor), VS ~ Uniform(bounds), fault type (informs
+    Frev/Fnm), subregion_id, basin_id, vsmeas_id ~ categorical
+    (uniform over however many categories `site_values` has fitted).
+    Geometry beyond M/R/Z/VS is fixed to `FOOTWALL_GEOMETRY` (footwall
+    only -- see module note). Anything else takes its `DEFAULTS` value.
+
+    Parameters
+    ----------
+    site_values, F, nl_model_dict, dataset_region, func_gs_scaling, const
+        Same as `scenario_predict`.
+    n_sample : int
+    seed : int
+    bounds : dict, optional
+        Overrides merged into `SAMPLE_BOUNDS`, e.g. {'M': (5.0, 7.5)}.
+    fixed : dict, optional
+        Overrides merged into `FOOTWALL_GEOMETRY` (Dip, FW, Rx, Ry0),
+        or any other scalar that should be held constant instead of
+        sampled/defaulted.
+    fault_type_logits : array, shape (3,), optional
+        Logits for [strike-slip, reverse, normal]; defaults to uniform.
+
+    Returns
+    -------
+    df_scenarios : DataFrame, shape (n_sample, n_vars)
+        Sampled predictor values, one row per scenario.
+    ln_median : Array, shape (n_sample, n_freq)
+        ln(median EAS) for each sampled scenario.
+    """
+    const = const if const is not None else ModelConstants()
+    bounds_ = {**SAMPLE_BOUNDS, **(bounds or {})}
+    fixed_ = {**FOOTWALL_GEOMETRY, **(fixed or {})}
+
+    if dataset_region == "global":
+        n_region, n_basin = 1, 1
+    else:
+        n_region = jnp.asarray(site_values["c_region"]).shape[0]
+        n_basin = jnp.asarray(site_values["c_basin"]).shape[0]
+    n_vsmeas = 2  # measured vs. estimated -- see coefficients_from_site_values
+
+    if fault_type_logits is None:
+        fault_type_logits = jnp.ones(3)
+
+    rng_key = random.key(seed)
+    (key_m, key_r, key_z, key_vs, key_ft,
+     key_region, key_basin, key_vsmeas) = random.split(rng_key, 8)
+
+    M = random.uniform(key_m, (n_sample,), minval=bounds_["M"][0], maxval=bounds_["M"][1])
+    R = random.uniform(key_r, (n_sample,), minval=bounds_["R"][0], maxval=bounds_["R"][1])
+    Z = random.uniform(key_z, (n_sample,), minval=bounds_["Z"][0], maxval=bounds_["Z"][1])
+    VS = random.uniform(key_vs, (n_sample,), minval=bounds_["VS"][0], maxval=bounds_["VS"][1])
+
+    fault_type = random.categorical(key_ft, fault_type_logits, shape=(n_sample,))
+    Frev = jnp.where(fault_type == 1, 1.0, 0.0)
+    Fnm = jnp.where(fault_type == 2, 1.0, 0.0)
+
+    subregion_id = random.categorical(key_region, jnp.ones(n_region), shape=(n_sample,))
+    basin_id = random.categorical(key_basin, jnp.ones(n_basin), shape=(n_sample,))
+    vsmeas_id = random.categorical(key_vsmeas, jnp.ones(n_vsmeas), shape=(n_sample,))
+
+    df_scenarios = pd.DataFrame({
+        "M": np.asarray(M), "R": np.asarray(R), "Z": np.asarray(Z), "VS": np.asarray(VS),
+        "Frev": np.asarray(Frev), "Fnm": np.asarray(Fnm),
+        "subregion_id": np.asarray(subregion_id),
+        "basin_id": np.asarray(basin_id),
+        "vsmeas_id": np.asarray(vsmeas_id),
+    })
+    for col, value in fixed_.items():
+        df_scenarios[col] = value
+    for col, default in DEFAULTS.items():
+        if col not in df_scenarios.columns:
+            df_scenarios[col] = default
+
+    ln_median = _predict_from_dataframe(
+        df_scenarios, site_values, F, nl_model_dict,
+        dataset_region, func_gs_scaling, const,
+    )
+    return df_scenarios, ln_median
