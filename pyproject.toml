@@ -5,6 +5,7 @@ dependencies = [
     "numpyro",
     "equinox",
     "pyproj",
+    "pyrvt",
 ]
 
 [project.optional-dependencies]
