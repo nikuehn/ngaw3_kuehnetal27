@@ -49,7 +49,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               calc_dWS=False, save_f_nl=False,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
-              sharing_config=None, estimate_kappa=None):
+              sharing_config=None, estimate_kappa=None,
+              save_kappa_adj=True, save_ranef=True):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -293,14 +294,14 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
         if c0_parametric:
             # c_0 already contains -c_0_kappa_star * F; this is a zero-mean deviation on top
-            kappa_adj = numpyro.deterministic(
-                "kappa_adj", c_0_kappa_star * (m_region_id * m_station_id - 1.0)
-            )
+            kappa_adj = c_0_kappa_star * (m_region_id * m_station_id - 1.0)
         else:
             # c_0 (spline) has no kappa term at all -- this IS the whole thing
-            kappa_adj = numpyro.deterministic(
-                "kappa_adj", c_0_kappa_star * m_region_id * m_station_id
-            )
+            kappa_adj = c_0_kappa_star * m_region_id * m_station_id
+
+        if save_kappa_adj:
+            numpyro.deterministic("kappa_adj", kappa_adj)
+
     else:
         kappa_adj = None
 
@@ -325,14 +326,21 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             if attn_eq:
                 deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
 
-    deltaS = numpyro.deterministic("deltaS", deltaS_raw * phi_s2s[vs_measured_id])
-    deltaB = numpyro.deterministic("deltaB", deltaB_raw * tau)
+    deltaS = deltaS_raw * phi_s2s[vs_measured_id]
+    deltaB = deltaB_raw * tau
     if attn_eq:
-        deltaB_attn = numpyro.deterministic("deltaB_attn", deltaB_attn_raw * tau_attn)
+        deltaB_attn = deltaB_attn_raw * tau_attn
     else:
         deltaB_attn = jnp.zeros((n_eq, n_freq))
-            
-    c_subregion = numpyro.deterministic("c_region", mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T)
+
+    c_subregion = mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T
+
+    if save_ranef:
+        numpyro.deterministic("deltaS", deltaS)
+        numpyro.deterministic("deltaB", deltaB)
+        numpyro.deterministic("deltaB_attn", deltaB_attn)
+        numpyro.deterministic("c_subregion", c_subregion)
+
 
     # --- monotonicity regularization on magnitude scaling (WUS only) ---
     numpyro.factor("reg_c_m2", jnp.where(c_m2 > c_m1,
