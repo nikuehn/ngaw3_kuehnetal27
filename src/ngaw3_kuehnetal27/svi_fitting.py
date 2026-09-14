@@ -95,7 +95,7 @@ def run_svi(
         loss = Trace_ELBO()
 
     svi = SVI(model, guide, optimizer, loss=loss)
-    svi_result = svi.run(rng_key, num_steps, **data_dict)
+    svi_result = svi.run(rng_key, num_steps, progress_bar=False, **data_dict)
 
     return SVIFitResult(params=svi_result.params, losses=svi_result.losses, svi_result=svi_result)
 
