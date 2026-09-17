@@ -116,6 +116,16 @@ def convert_to_json_serializable(obj):
     else:
         return obj
 
+def to_jax_arrays(obj):
+    """Recursively convert lists (from JSON) into jax arrays,
+    leaving bools/strings/scalars untouched."""
+    if isinstance(obj, dict):
+        return {k: to_jax_arrays(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return jnp.array(obj)
+    else:
+        return obj
+
 
 def resolve_svi_site_values(
     model: Callable,
