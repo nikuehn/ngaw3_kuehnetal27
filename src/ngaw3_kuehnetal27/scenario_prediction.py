@@ -24,6 +24,7 @@ from ngaw3_kuehnetal27.median_core import (
     calculate_median_training,
     predict_median_categorical,
 )
+from ngaw3_kuehnetal27.site_amplification.amp1d import amp1d_adj_from_vs30
 
 # Defaults for every scenario variable. Names follow the GMM's own
 # convention (M, R, Rx, Ry0, Z for Ztor, VS, ...) rather than the NN
@@ -182,6 +183,10 @@ def compute_deltaWS(
     data_dict : dict
         The same F / X_rec / X_eq / X_stat / X_id / Y (and, for
         dataset_region='global', global_dict) used to fit the model.
+        `amp1d_dict` -- if the model was fit with one -- is read from
+        here too (same key used when the model was run), not passed
+        separately; ignored for dataset_region='global' (amp1d is
+        WUS-only).
     site_values : dict
         Resolved SVI results (`resolve_svi_site_values` /
         `write_svi_results`) -- coefficient values plus the location of
@@ -283,6 +288,7 @@ def compute_deltaWS(
         deltaB=deltaB, deltaS=deltaS, deltaB_attn=deltaB_attn,
         c_basin=c_basin, c_subregion=c_subregion,
         kappa_adj=kappa_adj,
+        amp1d_dict=data_dict.get("amp1d_dict") if dataset_region == "wus" else None,
     )
 
     Y = jnp.asarray(Y)
@@ -296,11 +302,20 @@ def _predict_from_dataframe(
     dataset_region: str,
     func_gs_scaling: str,
     const: ModelConstants,
+    amp1d_dataset=None,
+    amp1d_target_name: str = "amp_predicted",
 ) -> jnp.ndarray:
     """
     Shared core of `scenario_predict` / `sample_scenarios`: given a
     fully-populated `df_scenarios` (every DEFAULTS column present),
     compute ln_median. No grid-building or sampling here.
+
+    amp1d_dataset : xarray.Dataset, optional
+        Precomputed 1D-profile amplification (vs30 x freq grid), e.g.
+        from `amp1d.load_amp1d_dataset`. When given, each row's `VS` is
+        interpolated against it (WUS only -- ignored for
+        dataset_region='global') to build `amp1d_adj`. Omit (the
+        default) to predict with vs30 scaling only, same as before.
     """
     coef = coefficients_from_site_values(site_values, dataset_region=dataset_region)
 
@@ -340,6 +355,11 @@ def _predict_from_dataframe(
         vs_measured_id=jnp.asarray(df_scenarios["vsmeas_id"].values, dtype=int),
     )
 
+    if amp1d_dataset is not None and dataset_region == "wus":
+        amp1d_adj = amp1d_adj_from_vs30(amp1d_dataset, VS, jnp.asarray(F), key=amp1d_target_name)
+    else:
+        amp1d_adj = None
+
     ln_median, _ = predict_median_categorical(
         R, Rx, Ry0, jnp.asarray(F), R_scaled,
         evt, site, coef, const,
@@ -348,6 +368,7 @@ def _predict_from_dataframe(
         c_basin_table=c_basin_table, basin_id=basin_id,
         c_subregion_table=c_subregion_table, subregion_id=subregion_id,
         kappa_adj_table=kappa_adj_table,
+        amp1d_adj=amp1d_adj,
     )
     return ln_median
 
@@ -359,6 +380,8 @@ def scenario_predict(
     dataset_region: str = "wus",
     func_gs_scaling: str = "stafford",
     const: Optional[ModelConstants] = None,
+    amp1d_dataset=None,
+    amp1d_target_name: str = "amp_predicted",
     **kwargs,
 ):
     """
@@ -379,6 +402,15 @@ def scenario_predict(
         Which dataset's coefficients to use.
     func_gs_scaling : {'stafford', other}
     const : ModelConstants, optional
+    amp1d_dataset : xarray.Dataset, optional
+        Precomputed 1D-profile amplification (vs30 x freq grid), e.g.
+        from `amp1d.load_amp1d_dataset`. When given, `VS` (from
+        `kwargs` or DEFAULTS) is interpolated against it per scenario
+        row and added to the median (WUS only). Omit for vs30-scaling
+        -only prediction, same as before.
+    amp1d_target_name : str
+        Data variable in `amp1d_dataset` to interpolate. Only used when
+        `amp1d_dataset` is given.
     **kwargs
         Arrays for any subset of scenario variables: M, R, Rx, Ry0, Z,
         VS, Frev, Fnm, Dip, FW, subregion_id, basin_id, vsmeas_id.
@@ -410,6 +442,7 @@ def scenario_predict(
     ln_median = _predict_from_dataframe(
         df_scenarios, site_values, F, nl_model_dict,
         dataset_region, func_gs_scaling, const,
+        amp1d_dataset=amp1d_dataset, amp1d_target_name=amp1d_target_name,
     )
 
     freq_cols = {f"f{f:.3f}": np.asarray(ln_median)[:, i] for i, f in enumerate(F)}
@@ -430,6 +463,8 @@ def sample_scenarios(
     bounds: Optional[Dict[str, tuple]] = None,
     fixed: Optional[Dict[str, Any]] = None,
     fault_type_logits: Optional[jnp.ndarray] = None,
+    amp1d_dataset=None,
+    amp1d_target_name: str = "amp_predicted",
 ):
     """
     Randomly sample `n_sample` scenario predictor combinations and
@@ -456,6 +491,9 @@ def sample_scenarios(
         sampled/defaulted.
     fault_type_logits : array, shape (3,), optional
         Logits for [strike-slip, reverse, normal]; defaults to uniform.
+    amp1d_dataset, amp1d_target_name
+        Same as `scenario_predict` -- sampled `VS` is interpolated
+        against `amp1d_dataset` per scenario row when given (WUS only).
 
     Returns
     -------
@@ -511,5 +549,6 @@ def sample_scenarios(
     ln_median = _predict_from_dataframe(
         df_scenarios, site_values, F, nl_model_dict,
         dataset_region, func_gs_scaling, const,
+        amp1d_dataset=amp1d_dataset, amp1d_target_name=amp1d_target_name,
     )
     return df_scenarios, ln_median

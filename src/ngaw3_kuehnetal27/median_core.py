@@ -163,6 +163,7 @@ def calculate_median_core(
     c_basin: Optional[Array] = None,       # (n_records, n_freq) or None
     c_subregion_adj: Optional[Array] = None,  # (n_records, n_freq) or None
     kappa_adj: Optional[Array] = None,   # (n_records,) or None -- per-record kappa term (population + deviation, or deviation only)
+    amp1d_adj: Optional[Array] = None,   # (n_records, n_freq) or None -- precomputed 1D site amplification (log scale), already resolved to per-record shape. WUS-only in practice; added on top of coef.c_vs, not in place of it.
 ) -> Tuple[Array, Array]:
     """
     Compute ln(median) for a set of records within one dataset.
@@ -202,6 +203,16 @@ def calculate_median_core(
         per-record shape. None (the default) is treated as zero -- this
         is what makes point prediction for a new scenario just a call
         with these omitted.
+    amp1d_adj : Array, shape (n_records, n_freq), optional
+        Precomputed 1D site amplification (log scale, additive), already
+        resolved to per-record shape -- e.g. gathered by station in
+        `calculate_median_training`, or interpolated from Vs30 for a
+        scenario grid. None (the default) means no precomputed
+        amplification is used, i.e. site response comes entirely from
+        `coef.c_vs * lnVS`. When supplied, `coef.c_vs` still applies on
+        top of it (fit to capture any residual difference between the
+        precomputed profiles and the data) -- pass zeroed/near-zero
+        `c_vs` coefficients if that residual term isn't wanted.
 
     Returns
     -------
@@ -217,6 +228,7 @@ def calculate_median_core(
     c_basin = zero if c_basin is None else c_basin
     c_subregion_adj = zero if c_subregion_adj is None else c_subregion_adj
     kappa_adj = 0.0 if kappa_adj is None else kappa_adj[:, jnp.newaxis]
+    amp1d_adj = zero if amp1d_adj is None else amp1d_adj
 
     # --- magnitude scaling ramp ---
     f_flt = smooth_trilinear_ramp(evt.M_model, 1.0, 4.5, 5.5)
@@ -294,7 +306,11 @@ def calculate_median_core(
     # --- vs30 scaling ---
     # coef.c_vs must already be resolved to (n_records, n_freq) by
     # vs_measured_id (see calculate_median_training).
-    median = median + f_nl + c_basin + coef.c_vs * site.lnVS[:, jnp.newaxis]
+    # --- precomputed 1D site amplification (optional, additive) ---
+    # amp1d_adj sits alongside coef.c_vs rather than replacing it: c_vs
+    # is still fit to soak up any systematic difference between the
+    # precomputed profiles and the data.
+    median = median + f_nl + c_basin + coef.c_vs * site.lnVS[:, jnp.newaxis] + amp1d_adj
 
     return median, f_nl
 
@@ -316,6 +332,7 @@ def calculate_median_training(
     c_basin: Array,         # (n_basin, n_freq)
     c_subregion: Array,     # (n_subregion, n_freq) -- zeros(1, n_freq) for global
     kappa_adj: Optional[Array] = None,   # (n_rec,), already resolved in the numpyro model
+    amp1d_dict: Optional[dict] = None,   # {'log_amp': (n_stat, n_freq)} or None -- precomputed per-station site amplification; gathered by stat_id here, then added on top of the usual vs30 scaling. WUS-only in practice -- omit (or pass None) for global.
 ) -> Tuple[Array, Array]:
     """
     Fitting-time wrapper for ONE dataset (call once for WUS, once for
@@ -325,10 +342,12 @@ def calculate_median_training(
 
     `coef` needs no gathering at all -- it's already the right values
     for this dataset. Only the genuinely per-record/per-category things
-    (random effects, basin, subregion, vs_measured_id) get indexed here.
+    (random effects, basin, subregion, vs_measured_id, amp1d) get
+    indexed here.
     """
     vs_measured_id_per_record = site_by_stat.vs_measured_id[idx.stat_id]
     resolved_coef = replace(coef, c_vs=coef.c_vs[vs_measured_id_per_record])
+    amp1d_adj = amp1d_dict["log_amp"][idx.stat_id] if amp1d_dict is not None else None
 
     evt = EventParams(
         M_model=evt_by_eq.M_model[idx.eq_id],
@@ -356,6 +375,7 @@ def calculate_median_training(
         c_basin=c_basin[idx.basin_id],
         c_subregion_adj=c_subregion[idx.subregion_id],
         kappa_adj=kappa_adj,
+        amp1d_adj=amp1d_adj,
     )
 
 
@@ -369,6 +389,7 @@ def predict_median(
     func_gs_scaling: str = "stafford",
     nl_model_dict: Optional[dict],
     dist_cell: Optional[Array] = None,
+    amp1d_adj: Optional[Array] = None,  # (n_scenarios, n_freq) or None -- precomputed site amplification, e.g. interpolated from Vs30 for this scenario's site (see scenario_prediction.py)
 ) -> Tuple[Array, Array]:
     """
     Point prediction for new scenarios (e.g. hazard-consistent ground
@@ -385,6 +406,7 @@ def predict_median(
         func_gs_scaling=func_gs_scaling,
         nl_model_dict=nl_model_dict,
         # deltaB, deltaS, c_subregion_adj all default to None -> zero
+        amp1d_adj=amp1d_adj,
     )
 
 
@@ -403,6 +425,7 @@ def predict_median_categorical(
     c_subregion_table: Optional[Array] = None,  # (n_subregion, n_freq)
     subregion_id: Optional[Array] = None,       # (n_scenarios,) -- required if c_subregion_table given
     kappa_adj_table: Optional[Array] = None,  # (n_subregion,) -- per-subregion kappa deviation
+    amp1d_adj: Optional[Array] = None,  # (n_scenarios, n_freq) or None -- precomputed site amplification, e.g. interpolated from Vs30 for each scenario row (see scenario_prediction.py)
 ) -> Tuple[Array, Array]:
     """
     Like `predict_median`, but for scenarios that need to select a
@@ -421,6 +444,12 @@ def predict_median_categorical(
         `basin_id` / `subregion_id` (length n_scenarios) to look up a
         value per scenario row. Omit both (the default) for no
         basin/subregion adjustment.
+    amp1d_adj : Array, shape (n_scenarios, n_freq), optional
+        Already resolved per-row -- unlike `c_basin_table`/
+        `c_subregion_table` there's no categorical table here, since
+        amplification varies continuously with Vs30 rather than by
+        category. Compute it (e.g. by interpolating from a precomputed
+        profile dataset) before calling this function.
     """
     resolved_coef = replace(coef, c_vs=coef.c_vs[site.vs_measured_id])
 
@@ -436,4 +465,5 @@ def predict_median_categorical(
         c_basin=c_basin,
         c_subregion_adj=c_subregion_adj,
         kappa_adj=kappa_adj,
+        amp1d_adj=amp1d_adj,
     )

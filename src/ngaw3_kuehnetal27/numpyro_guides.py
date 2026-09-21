@@ -43,7 +43,8 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
               sharing_config=None, estimate_kappa=None,
-              save_kappa_adj=True, save_ranef=True):
+              save_kappa_adj=True, save_ranef=True,
+              estimate_cvs=True, amp1d_dict=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -174,8 +175,10 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     sample_median_coefficient_guide("c_hw", spline_basis, sharing_config, init_mu=0.5)
 
     # --- Vs30 categories: WUS has 2 (measured/estimated), global has 1 ---
-    make_spline_coeff_guide(spline_basis, "c_vs_meas", monotonic=None, init_mu=0.0)
-    make_spline_coeff_guide(spline_basis, "c_vs_est", monotonic=None, init_mu=0.0)
+    if estimate_cvs:
+        make_spline_coeff_guide(spline_basis, "c_vs_meas", monotonic=None, init_mu=0.0)
+        make_spline_coeff_guide(spline_basis, "c_vs_est", monotonic=None, init_mu=0.0)
+
     if global_dict is not None:
         make_spline_coeff_guide(spline_basis, "c_vs_gl", monotonic=None, init_mu=0.0)
 

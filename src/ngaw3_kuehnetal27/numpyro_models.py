@@ -50,7 +50,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               func_gs_scaling="stafford", estimate_gs_exp="fixed",
               L_freq=None, global_dict=None, calc_log_lik=False,
               sharing_config=None, estimate_kappa=None,
-              save_kappa_adj=True, save_ranef=True):
+              save_kappa_adj=True, save_ranef=True,
+              estimate_cvs=True, amp1d_dict=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -207,8 +208,15 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     # has no such distinction (1 category). Per the consistency principle,
     # global's single category is now a spline too (previously a flat
     # per-frequency Normal) -- see notes below.
-    c_vs_meas = make_spline_coeff(spline_basis, "c_vs_meas", mu_loc=0.0, mu_scale=1.0)
-    c_vs_est = make_spline_coeff(spline_basis, "c_vs_est", mu_loc=0.0, mu_scale=1.0)
+    # estimate_cvs=False fixes both vs30-scaling coefficients at zero --
+    # e.g. when amp1d_dict supplies precomputed site amplification and no
+    # residual vs30 term is wanted on top of it.
+    if estimate_cvs:
+        c_vs_meas = make_spline_coeff(spline_basis, "c_vs_meas", mu_loc=0.0, mu_scale=1.0)
+        c_vs_est = make_spline_coeff(spline_basis, "c_vs_est", mu_loc=0.0, mu_scale=1.0)
+    else:
+        c_vs_meas = numpyro.deterministic("c_vs_meas", jnp.zeros(n_freq))
+        c_vs_est = numpyro.deterministic("c_vs_est", jnp.zeros(n_freq))
     c_vs = jnp.stack([c_vs_meas, c_vs_est])
     if global_dict is not None:
         c_vs_gl_single = make_spline_coeff(spline_basis, "c_vs_gl", mu_loc=0.0, mu_scale=1.0)
@@ -374,6 +382,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         deltaB=deltaB, deltaS=deltaS, deltaB_attn=deltaB_attn,
         c_basin=c_basin, c_subregion=c_subregion,
         kappa_adj=kappa_adj,
+        amp1d_dict=amp1d_dict,
     )
 
     if save_f_nl:
