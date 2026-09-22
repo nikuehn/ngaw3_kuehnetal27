@@ -81,8 +81,8 @@ DEFAULT_COEFFICIENT_SHARING: Dict[str, str] = {
 DEFAULT_PRIOR: Dict[str, list] = {
     # --- median coefficients (spline mu_loc, mu_scale) ---
     "c_0": [-5.0, 5.0],
-    "c_m1": [1.5, 1.0],
-    "c_m2": [1.0, 1.0],
+    "c_m1": [3.5, 0.5],
+    "c_m2": [3.0, 0.5],
     "c_m3": [-0.45, 0.8],          # scalar LogNormal, not a spline
     "c_zt": [0.0, 0.5],
     "c_nm": [0.0, 0.5],

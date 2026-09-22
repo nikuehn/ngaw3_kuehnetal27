@@ -372,8 +372,6 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     else:
         c_subregion = jnp.zeros((n_subregion, n_freq))
 
-    c_subregion = mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T
-
     if save_ranef:
         numpyro.deterministic("deltaS", deltaS)
         numpyro.deterministic("deltaB", deltaB)
