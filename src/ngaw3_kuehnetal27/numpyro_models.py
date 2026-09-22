@@ -367,7 +367,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         numpyro.deterministic("deltaS", deltaS)
         numpyro.deterministic("deltaB", deltaB)
         numpyro.deterministic("deltaB_attn", deltaB_attn)
-        numpyro.deterministic("c_subregion", c_subregion)
+        numpyro.deterministic("c_region", c_subregion)
 
 
     # --- monotonicity regularization on magnitude scaling (WUS only) ---
