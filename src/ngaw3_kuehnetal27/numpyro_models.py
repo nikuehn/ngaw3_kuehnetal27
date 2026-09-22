@@ -52,7 +52,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               L_freq=None, global_dict=None, calc_log_lik=False,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
-              estimate_cvs=True, amp1d_dict=None, prior_config=None):
+              estimate_cvs=True, amp1d_dict=None, prior_config=None,
+              include_region=True):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
     prior_config = prior_config if prior_config is not None else DEFAULT_PRIOR
@@ -343,8 +344,9 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         nu_rec = numpyro.sample("nu_rec", dist.Gamma(*prior_config["nu_rec"]))
 
-        with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
-            c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
+        if include_region:
+            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
             deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
@@ -360,6 +362,15 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         deltaB_attn = deltaB_attn_raw * tau_attn
     else:
         deltaB_attn = jnp.zeros((n_eq, n_freq))
+
+    # --- geology subregion random effect (WUS only) ---
+    if include_region:
+        sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
+                                            positive=True, transform="softplus")
+        L_subregion = sigma_subregion[..., None] * L_freq
+        c_subregion = mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T
+    else:
+        c_subregion = jnp.zeros((n_subregion, n_freq))
 
     c_subregion = mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T
 

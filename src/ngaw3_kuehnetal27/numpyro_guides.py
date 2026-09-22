@@ -44,7 +44,8 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               L_freq=None, global_dict=None, calc_log_lik=False,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
-              estimate_cvs=True, amp1d_dict=None):
+              estimate_cvs=True, amp1d_dict=None, prior_config=None,
+              include_region=True):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -252,12 +253,13 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             transforms=dist.transforms.ExpTransform(),
         ))
 
-        with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
-            numpyro.sample("c_region_raw", dist.Normal(
-                loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
-                scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
-                                    constraint=dist.constraints.positive),
-            ))
+        if include_region:
+            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                numpyro.sample("c_region_raw", dist.Normal(
+                    loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
+                    scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
+                                        constraint=dist.constraints.positive),
+                ))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
             numpyro.sample("deltaS_raw", dist.Normal(
