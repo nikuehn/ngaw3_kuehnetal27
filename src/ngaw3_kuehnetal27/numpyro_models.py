@@ -16,6 +16,7 @@ from patsy import dmatrix
 from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
 from ngaw3_kuehnetal27.coefficient_sharing import (
     DEFAULT_COEFFICIENT_SHARING,
+    DEFAULT_PRIOR,
     sample_median_coefficient,
     sample_c0_coefficient,
     sample_cgs1_coefficient,
@@ -51,9 +52,10 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               L_freq=None, global_dict=None, calc_log_lik=False,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
-              estimate_cvs=True, amp1d_dict=None):
+              estimate_cvs=True, amp1d_dict=None, prior_config=None):
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
+    prior_config = prior_config if prior_config is not None else DEFAULT_PRIOR
 
     # ------------------------------------------------------------------
     # WUS data
@@ -94,14 +96,14 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     # --- geometric spreading break: WUS-only estimate; global always fixed ---
     if estimate_gs_break:
-        gs_break = numpyro.sample("gs_break", dist.Gamma(94.8, 1.9))
+        gs_break = numpyro.sample("gs_break", dist.Gamma(*prior_config["gs_break"]))
     else:
         gs_break = 50.0
 
     # --- magnitude uncertainty (WUS only, as in original) ---
     if include_mag_unc == "Classical":
-        mean_M = numpyro.sample("mean_M", dist.Normal(5, 1))
-        sigma_M = numpyro.sample("sigma_M", dist.LogNormal(-0.14, 0.236))
+        mean_M = numpyro.sample("mean_M", dist.Normal(*prior_config["mean_M"]))
+        sigma_M = numpyro.sample("sigma_M", dist.LogNormal(*prior_config["sigma_M"]))
         M_model = numpyro.sample("M_model", dist.Normal(mean_M, sigma_M).expand([n_eq]))
         numpyro.sample("M_obs", dist.Normal(M_model, M_sd), obs=M_eq)
     elif include_mag_unc == "Berkson":
@@ -116,16 +118,16 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     if dist_cell is not None:
         attn_mode = "dist_cell"
         n_cell = dist_cell.shape[1]
-        mu_Q_0 = numpyro.sample("mu_Q_0", dist.Gamma(4.65, 0.01))
-        Q_exp = numpyro.sample("Q_exp", dist.Gamma(4.65, 11.16))
-        sigma_Q_0 = numpyro.sample("sigma_Q_0", dist.HalfNormal(10))
+        mu_Q_0 = numpyro.sample("mu_Q_0", dist.Gamma(*prior_config["mu_Q_0"]))
+        Q_exp = numpyro.sample("Q_exp", dist.Gamma(*prior_config["Q_exp"]))
+        sigma_Q_0 = numpyro.sample("sigma_Q_0", dist.HalfNormal(*prior_config["sigma_Q_0"]))
         with numpyro.plate("plate_cell", n_cell, dim=-1):
             Q_0 = numpyro.sample("Q_0", dist.TruncatedNormal(mu_Q_0, sigma_Q_0, low=0))
         c_attn = None
     elif attn_Q:
         attn_mode = "Q"
-        Q_0 = numpyro.sample("Q_0", dist.Gamma(4.65, 0.01))
-        Q_exp = numpyro.sample("Q_exp", dist.Gamma(4.65, 11.16))
+        Q_0 = numpyro.sample("Q_0", dist.Gamma(*prior_config["Q_0"]))
+        Q_exp = numpyro.sample("Q_exp", dist.Gamma(*prior_config["Q_exp"]))
         c_attn = None
     else:
         attn_mode = "c_attn"
@@ -134,14 +136,14 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     if attn_mode == "c_attn":
         c_attn, c_attn_gl = sample_median_coefficient(
-            "c_attn", spline_basis, sharing_config,
-            mu_loc=-1.0, mu_scale=1.0, positive=True, transform="softplus",
+            "c_attn", spline_basis, sharing_config, prior_config,
+            positive=True, transform="softplus",
         )
     elif global_dict is not None:
         # No WUS c_attn to (potentially) share -- global samples its own,
         # same spline structure as the 'c_attn' branch above would use.
         c_attn_gl = make_spline_coeff(
-            spline_basis, "c_attn_gl", mu_loc=-1.0, mu_scale=1.0,
+            spline_basis, "c_attn_gl", mu_loc=prior_config["c_attn"][0], mu_scale=prior_config["c_attn"][1],
             positive=True, transform="softplus",
         )
     else:
@@ -149,14 +151,14 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     # --- zt_break: WUS-only estimate; global always fixed ---
     if estimate_zt_break:
-        zt_break = numpyro.sample("zt_break", dist.Gamma(6.94, 5.49))
+        zt_break = numpyro.sample("zt_break", dist.Gamma(*prior_config["zt_break"]))
     else:
         zt_break = 1.5
 
     # c_m3: single scalar (not frequency-dependent), always shared as in
     # the original -- there's no dataset_local path implemented for this
     # one yet, so sharing_config["c_m3"] is currently a no-op placeholder.
-    c_m3 = numpyro.sample("c_m3", dist.LogNormal(-0.45, 0.8))
+    c_m3 = numpyro.sample("c_m3", dist.LogNormal(*prior_config["c_m3"]))
     c_m3_gl = c_m3
 
     # c_nft_1/c_nft_2: only the 'freq' mode is a spline; 'ya14'/'coeff' are
@@ -166,41 +168,44 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         c_nft_1 = -1.72 * jnp.log(10) + 0.43 * jnp.log(10) * 4.5
         c_nft_2 = 0.43 * jnp.log(10)
     elif calc_nft == "coeff":
-        c_nft_1 = numpyro.sample("c_nft_1", dist.Normal(0.5, 0.5))
-        c_nft_2 = numpyro.sample("c_nft_2", dist.LogNormal(0, 0.2))
+        c_nft_1 = numpyro.sample("c_nft_1", dist.Normal(*prior_config["c_nft_1"]))
+        c_nft_2 = numpyro.sample("c_nft_2", dist.LogNormal(*prior_config["c_nft_2"]))
     elif calc_nft == "freq":
-        c_nft_1 = make_spline_coeff(spline_basis, "c_nft_1", mu_loc=0.5, mu_scale=0.5,
-                                     monotonic="decreasing")
-        c_nft_2 = make_spline_coeff(spline_basis, "c_nft_2", mu_loc=0.0, mu_scale=0.2,
+        c_nft_1 = make_spline_coeff(spline_basis, "c_nft_1", mu_loc=prior_config["c_nft_1"][0],
+                                     mu_scale=prior_config["c_nft_1"][1], monotonic="decreasing")
+        c_nft_2 = make_spline_coeff(spline_basis, "c_nft_2", mu_loc=prior_config["c_nft_2"][0],
+                                     mu_scale=prior_config["c_nft_2"][1],
                                      positive=True, transform="softplus", monotonic="increasing")
     c_nft_1_gl, c_nft_2_gl = c_nft_1, c_nft_2
 
     # --- c_0, c_gs1: parametric-vs-spline switch, applied consistently ---
     c_0, c_0_gl, c_0_kappa_star = sample_c0_coefficient(
-        spline_basis, ln_F, F, sharing_config, parametric=c0_parametric,
+        spline_basis, ln_F, F, sharing_config, prior_config, parametric=c0_parametric,
     )
-    c_gs1, c_gs1_gl = sample_cgs1_coefficient(spline_basis, ln_F, sharing_config, parametric=cgs1_parametric)
+    c_gs1, c_gs1_gl = sample_cgs1_coefficient(
+        spline_basis, ln_F, sharing_config, prior_config, parametric=cgs1_parametric,
+    )
 
     # --- remaining spline coefficients, via the generic sampler ---
     c_m1, c_m1_gl = sample_median_coefficient(
-        "c_m1", spline_basis, sharing_config,
-        mu_loc=1.5, mu_scale=1.0, positive=True, transform="softplus", monotonic="decreasing",
+        "c_m1", spline_basis, sharing_config, prior_config,
+        positive=True, transform="softplus", monotonic="decreasing",
     )
     c_m2, c_m2_gl = sample_median_coefficient(
-        "c_m2", spline_basis, sharing_config,
-        mu_loc=1.0, mu_scale=1.0, positive=True, transform="softplus", monotonic="decreasing",
+        "c_m2", spline_basis, sharing_config, prior_config,
+        positive=True, transform="softplus", monotonic="decreasing",
     )
     c_zt, c_zt_gl = sample_median_coefficient(
-        "c_zt", spline_basis, sharing_config, mu_loc=0.0, mu_scale=0.5,
+        "c_zt", spline_basis, sharing_config, prior_config,
     )
     c_nm, c_nm_gl = sample_median_coefficient(
-        "c_nm", spline_basis, sharing_config, mu_loc=0.0, mu_scale=0.5,
+        "c_nm", spline_basis, sharing_config, prior_config,
     )
     c_rev, c_rev_gl = sample_median_coefficient(
-        "c_rev", spline_basis, sharing_config, mu_loc=0.0, mu_scale=0.5,
+        "c_rev", spline_basis, sharing_config, prior_config,
     )
     c_hw, c_hw_gl = sample_median_coefficient(
-        "c_hw", spline_basis, sharing_config, mu_loc=0.5, mu_scale=0.5,
+        "c_hw", spline_basis, sharing_config, prior_config,
     )
 
     # --- Vs30 categories ---
@@ -212,14 +217,17 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     # e.g. when amp1d_dict supplies precomputed site amplification and no
     # residual vs30 term is wanted on top of it.
     if estimate_cvs:
-        c_vs_meas = make_spline_coeff(spline_basis, "c_vs_meas", mu_loc=0.0, mu_scale=1.0)
-        c_vs_est = make_spline_coeff(spline_basis, "c_vs_est", mu_loc=0.0, mu_scale=1.0)
+        c_vs_meas = make_spline_coeff(spline_basis, "c_vs_meas", mu_loc=prior_config["c_vs_meas"][0],
+                                       mu_scale=prior_config["c_vs_meas"][1])
+        c_vs_est = make_spline_coeff(spline_basis, "c_vs_est", mu_loc=prior_config["c_vs_est"][0],
+                                      mu_scale=prior_config["c_vs_est"][1])
     else:
         c_vs_meas = numpyro.deterministic("c_vs_meas", jnp.zeros(n_freq))
         c_vs_est = numpyro.deterministic("c_vs_est", jnp.zeros(n_freq))
     c_vs = jnp.stack([c_vs_meas, c_vs_est])
     if global_dict is not None:
-        c_vs_gl_single = make_spline_coeff(spline_basis, "c_vs_gl", mu_loc=0.0, mu_scale=1.0)
+        c_vs_gl_single = make_spline_coeff(spline_basis, "c_vs_gl", mu_loc=prior_config["c_vs_gl"][0],
+                                            mu_scale=prior_config["c_vs_gl"][1])
         c_vs_gl = jnp.stack([c_vs_gl_single])
 
     # --- geometric spreading exponent (logistic-hinge form only) ---
@@ -229,34 +237,43 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         if estimate_gs_exp == "fixed":
             gs_exp = 2.0
         elif estimate_gs_exp == "coeff":
-            gs_exp = numpyro.sample("gs_exp", dist.InverseGamma(6.18, 7.91))
+            gs_exp = numpyro.sample("gs_exp", dist.InverseGamma(*prior_config["gs_exp"]))
         elif estimate_gs_exp == "freq":
-            gs_exp = make_spline_coeff(spline_basis, "gs_exp", mu_loc=1.2, mu_scale=0.5,
+            gs_exp = make_spline_coeff(spline_basis, "gs_exp", mu_loc=prior_config["gs_exp_freq"][0],
+                                        mu_scale=prior_config["gs_exp_freq"][1],
                                         positive=True, transform="softplus")
 
-    # --- standard deviations / random effects (WUS) -- unchanged, out of scope ---
-    phi_s2s_meas = make_spline_coeff(spline_basis, "phi_s2s_meas", mu_loc=-0.7, mu_scale=0.5,
+    # --- standard deviations / random effects (WUS) ---
+    phi_s2s_meas = make_spline_coeff(spline_basis, "phi_s2s_meas", mu_loc=prior_config["phi_s2s_meas"][0],
+                                      mu_scale=prior_config["phi_s2s_meas"][1],
                                       positive=True, transform="softplus")
-    phi_s2s_est = make_spline_coeff(spline_basis, "phi_s2s_est", mu_loc=-0.7, mu_scale=0.5,
+    phi_s2s_est = make_spline_coeff(spline_basis, "phi_s2s_est", mu_loc=prior_config["phi_s2s_est"][0],
+                                     mu_scale=prior_config["phi_s2s_est"][1],
                                      positive=True, transform="softplus")
     phi_s2s = jnp.stack([phi_s2s_meas, phi_s2s_est])
 
     if attn_eq:
-        tau_attn = make_spline_coeff(spline_basis, "tau_attn", mu_loc=-0.7, mu_scale=0.5,
+        tau_attn = make_spline_coeff(spline_basis, "tau_attn", mu_loc=prior_config["tau_attn"][0],
+                                      mu_scale=prior_config["tau_attn"][1],
                                       positive=True, transform="softplus")
 
-    phi_ss_0 = make_spline_coeff(spline_basis, "phi_ss_0", mu_loc=-0.7, mu_scale=0.5)
-    phi_ss_1 = make_spline_coeff(spline_basis, "phi_ss_1", mu_loc=-0.7, mu_scale=0.5)
+    phi_ss_0 = make_spline_coeff(spline_basis, "phi_ss_0", mu_loc=prior_config["phi_ss_0"][0],
+                                  mu_scale=prior_config["phi_ss_0"][1])
+    phi_ss_1 = make_spline_coeff(spline_basis, "phi_ss_1", mu_loc=prior_config["phi_ss_1"][0],
+                                  mu_scale=prior_config["phi_ss_1"][1])
     phi_ss = jnp.exp(smooth_trilinear_ramp_repar(M_model[eq_id, jnp.newaxis],
                                                   phi_ss_0, phi_ss_1, mb1, mb2, delta=0.2))
 
-    tau_0 = make_spline_coeff(spline_basis, "tau_0", mu_loc=-0.7, mu_scale=0.5)
-    tau_1 = make_spline_coeff(spline_basis, "tau_1", mu_loc=-0.7, mu_scale=0.5)
+    tau_0 = make_spline_coeff(spline_basis, "tau_0", mu_loc=prior_config["tau_0"][0],
+                               mu_scale=prior_config["tau_0"][1])
+    tau_1 = make_spline_coeff(spline_basis, "tau_1", mu_loc=prior_config["tau_1"][0],
+                               mu_scale=prior_config["tau_1"][1])
     tau = jnp.exp(smooth_trilinear_ramp_repar(M_model[:, jnp.newaxis],
                                                tau_0, tau_1, mb1, mb2, delta=0.2))
 
     # --- geology subregion random effect (WUS only) ---
-    sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
+    sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=prior_config["sigma_region"][0],
+                                         mu_scale=prior_config["sigma_region"][1],
                                          positive=True, transform="softplus")
     L_subregion = sigma_subregion[..., None] * L_freq
     # with numpyro.plate("plate_region", n_subregion, dim=-1):
@@ -269,11 +286,12 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     if estimate_any_kappa:
         if not c0_parametric:
-            c_0_kappa_star = numpyro.sample("c_0_kappa_star", dist.HalfNormal(0.3))
+            c_0_kappa_star = numpyro.sample("c_0_kappa_star", dist.HalfNormal(*prior_config["c_0_kappa_star"]))
         # else: c_0_kappa_star already sampled inside sample_c0_coefficient above
 
         if estimate_region_kappa:
-            sigma_ln_kappa_region = numpyro.sample("sigma_ln_kappa_region", dist.Exponential(10.0))
+            sigma_ln_kappa_region = numpyro.sample("sigma_ln_kappa_region",
+                                                     dist.Exponential(*prior_config["sigma_ln_kappa_region"]))
             with numpyro.plate("plate_region", n_subregion, dim=-1):
                 ln_kappa_region_raw = numpyro.sample("ln_kappa_region_raw", dist.Normal(0, 1))
             m_region = numpyro.deterministic("m_region", jnp.exp(ln_kappa_region_raw * sigma_ln_kappa_region))
@@ -287,7 +305,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             m_region_id = 1.0
 
         if estimate_station_kappa:
-            sigma_ln_kappa_station = numpyro.sample("sigma_ln_kappa_station", dist.Exponential(10.0))
+            sigma_ln_kappa_station = numpyro.sample("sigma_ln_kappa_station",
+                                                      dist.Exponential(*prior_config["sigma_ln_kappa_station"]))
             with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
                 ln_kappa_station_raw = numpyro.sample("ln_kappa_station_raw", dist.Normal(0, 1))
             m_station = numpyro.deterministic("m_station", jnp.exp(ln_kappa_station_raw * sigma_ln_kappa_station))
@@ -315,13 +334,14 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     # --- basin term (WUS only) ---
     c_basin_sample = jnp.stack([
-        make_spline_coeff(spline_basis, f"c_b_{i}", mu_loc=0, mu_scale=0.5)
+        make_spline_coeff(spline_basis, f"c_b_{i}", mu_loc=prior_config["c_basin"][0],
+                           mu_scale=prior_config["c_basin"][1])
         for i in np.arange(n_basin - 1)
     ])
     c_basin = numpyro.deterministic("c_basin", insert_zero_row(ref_basin_id, c_basin_sample))
 
     with numpyro.plate("plate_freq", n_freq, dim=-1):
-        nu_rec = numpyro.sample("nu_rec", dist.Gamma(2, 0.1))
+        nu_rec = numpyro.sample("nu_rec", dist.Gamma(*prior_config["nu_rec"]))
 
         with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
             c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
@@ -462,13 +482,13 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         lnVS_gl = jnp.log(VS_stat_gl) - log_V_ref
 
         with numpyro.plate("plate_freq_gl", n_freq, dim=-1):
-            nu_rec_gl = numpyro.sample("nu_rec_gl", dist.Gamma(2, 0.1))
-            phi_ss_gl = numpyro.sample("phi_ss_gl", dist.HalfNormal(0.5))
-            tau_gl = numpyro.sample("tau_gl", dist.HalfNormal(0.5))
-            phi_s2s_gl = numpyro.sample("phi_s2s_gl", dist.HalfNormal(0.5))
+            nu_rec_gl = numpyro.sample("nu_rec_gl", dist.Gamma(*prior_config["nu_rec_gl"]))
+            phi_ss_gl = numpyro.sample("phi_ss_gl", dist.HalfNormal(*prior_config["phi_ss_gl"]))
+            tau_gl = numpyro.sample("tau_gl", dist.HalfNormal(*prior_config["tau_gl"]))
+            phi_s2s_gl = numpyro.sample("phi_s2s_gl", dist.HalfNormal(*prior_config["phi_s2s_gl"]))
 
             if attn_eq:
-                tau_attn_gl = numpyro.sample("tau_attn_gl", dist.HalfNormal(0.5))
+                tau_attn_gl = numpyro.sample("tau_attn_gl", dist.HalfNormal(*prior_config["tau_attn_gl"]))
 
             with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
                 deltaS_raw_gl = numpyro.sample("deltaS_raw_gl", dist.Normal(0, 1))
