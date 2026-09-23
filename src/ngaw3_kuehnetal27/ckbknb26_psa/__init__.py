@@ -10,7 +10,11 @@ from .nonlinear_site import (
     compute_ilhan26_ir,
     compute_ln_nonlinearity_ilhan26,
 )
-from .scenario_prediction import DEFAULTS, scenario_predict_campbelletal27
+from .scenario_prediction import (
+    DEFAULTS,
+    scenario_predict_campbelletal27,
+    scenario_predict_campbelletal27_reference,
+)
 
 __all__ = [
     "Coefficients",
@@ -23,4 +27,5 @@ __all__ = [
     "compute_ln_nonlinearity_ilhan26",
     "DEFAULTS",
     "scenario_predict_campbelletal27",
+    "scenario_predict_campbelletal27_reference",
 ]

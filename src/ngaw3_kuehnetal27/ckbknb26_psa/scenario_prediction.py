@@ -7,16 +7,21 @@ Scenario-grid median PSA prediction for the CKBKNB26 (campbelletal27) GMM
 from __future__ import annotations
 
 import itertools
+import os
 from typing import Any, Dict, Optional
 
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 
-from .median_core import Coefficients, calculate_ln_median_psa_campbelletal27
-from .nonlinear_site import Ilhan26Coefficients
+from .median_core import Coefficients, calculate_ln_median_psa_campbelletal27, load_coefficients
+from .nonlinear_site import Ilhan26Coefficients, load_ilhan26_coefficients
 
-__all__ = ["DEFAULTS", "scenario_predict_campbelletal27"]
+__all__ = ["DEFAULTS", "scenario_predict_campbelletal27", "scenario_predict_campbelletal27_reference"]
+
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+_COEF_MEAN_PATH = os.path.join(_DATA_DIR, "CoefMean.csv")
+_ILHAN26_COEFFS_PATH = os.path.join(_DATA_DIR, "ILHAN26_Coeffs.csv")
 
 # Defaults for every scenario variable. NaN marks the geometry fields that
 # `calculate_ln_median_psa` back-fills itself (see median_core.py) --
@@ -128,3 +133,60 @@ def scenario_predict_campbelletal27(
     df_pred = pd.concat([df_scenarios, pd.DataFrame(period_cols)], axis=1)
 
     return df_pred, values
+
+
+def scenario_predict_campbelletal27_reference(**kwargs):
+    """
+    Self-contained version of `scenario_predict_campbelletal27`: reads the
+    package's own bundled coefficients (`data/CoefMean.csv`,
+    `data/ILHAN26_Coeffs.csv`) itself -- no `Coefficients`/
+    `Ilhan26Coefficients` objects to load or pass in beforehand -- and
+    always predicts the full spectrum (every period present in
+    `CoefMean.csv`, in file order), with the Ilhan et al. (2026)
+    nonlinear site term included. PGA, needed internally to drive the
+    nonlinear model, is taken from `CoefMean.csv`'s first row (period
+    0.01 s), matching the R model's `Coeffs.PGA = Coeffs[1, ]`.
+
+    Use this when you just want "the model's predictions" without
+    thinking about coefficient files; use `scenario_predict_campbelletal27`
+    directly (with coefficients loaded once and reused) when predicting
+    many batches, or a restricted set of periods, since this function
+    re-reads and re-interpolates nothing -- it reloads the coefficient
+    CSVs from disk on every call.
+
+    Parameters
+    ----------
+    **kwargs
+        Scenario variables, exactly as for `scenario_predict_campbelletal27`
+        (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot, Vs30,
+        Vs30_meas, Z25, HW). Unspecified variables take their `DEFAULTS`
+        value. Every combination of the supplied arrays is predicted
+        (Cartesian product).
+
+    Returns
+    -------
+    df_scenarios : DataFrame, shape (n_combos, n_vars + n_periods)
+        Scenario variables plus one "lnT<period>" column per period in
+        `CoefMean.csv`.
+    ln_median : jnp.ndarray, shape (n_combos, n_periods)
+        ln(median PSA), including nonlinear site amplification, for every
+        period in `CoefMean.csv`, in file order.
+
+    Example
+    -------
+        df, ln_median = scenario_predict_campbelletal27_reference(
+            M=np.linspace(4, 8, 40), Rrup=np.array([10., 30., 100.]), Vs30=300.0,
+        )
+    """
+    coef = load_coefficients(_COEF_MEAN_PATH)
+    periods = np.asarray(coef.Per).tolist()
+
+    # First row of the coefficient file -- not necessarily literally 0.01
+    # if CoefMean.csv were ever swapped out, so read it off rather than
+    # hard-coding it, but it's period 0.01 s in the file shipped here.
+    coef_pga = load_coefficients(_COEF_MEAN_PATH, periods=[periods[0]])
+    nl_coef = load_ilhan26_coefficients(_ILHAN26_COEFFS_PATH, periods=periods)
+
+    return scenario_predict_campbelletal27(
+        coef, output="ln_median", nl_coef=nl_coef, coef_pga=coef_pga, **kwargs
+    )
