@@ -273,10 +273,10 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                                                tau_0, tau_1, mb1, mb2, delta=0.2))
 
     # --- geology subregion random effect (WUS only) ---
-    sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=prior_config["sigma_region"][0],
-                                         mu_scale=prior_config["sigma_region"][1],
-                                         positive=True, transform="softplus")
-    L_subregion = sigma_subregion[..., None] * L_freq
+    # sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=prior_config["sigma_region"][0],
+    #                                      mu_scale=prior_config["sigma_region"][1],
+    #                                      positive=True, transform="softplus")
+    # L_subregion = sigma_subregion[..., None] * L_freq
     # with numpyro.plate("plate_region", n_subregion, dim=-1):
     #     c_subregion = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_subregion))
 
