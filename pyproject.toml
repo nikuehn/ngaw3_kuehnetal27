@@ -18,7 +18,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-data]
 ngaw3_kuehnetal27 = ["data/*.csv", "data/*.nc", "results/**/*.json", 
-                     "results/**/*.gz", "results/**/*.csv"]
+                     "results/**/*.gz", "results/**/*.csv",
+                     "ckbknb26_psa/data/*.csv"]
 
 [tool.setuptools]
 include-package-data = true
