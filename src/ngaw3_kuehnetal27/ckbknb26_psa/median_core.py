@@ -133,6 +133,28 @@ class Coefficients(NamedTuple):
     h6: jnp.ndarray
 
 
+def _select_periods(df: pd.DataFrame, periods: Sequence[float], rtol: float = 1e-6, atol: float = 1e-9) -> pd.DataFrame:
+    """
+    Select the rows of `df` (must have a `Per` column) matching `periods`,
+    tolerant of small floating-point noise -- in particular, a `periods`
+    list sourced from a `Coefficients.Per` JAX array will have been
+    silently rounded to float32 (~1e-7 relative error) unless the caller
+    has enabled `jax_enable_x64`, which an exact-equality match (e.g.
+    pandas `.isin`) would then reject even though it's really the same
+    period (e.g. 0.01 read back as 0.009999999776482582). Keeps the
+    file's original row order, not `periods`' order.
+    """
+    per_values = df["Per"].to_numpy(dtype=np.float64)
+    periods_arr = np.asarray(list(periods), dtype=np.float64)
+    is_selected = np.any(np.isclose(per_values[:, None], periods_arr[None, :], rtol=rtol, atol=atol), axis=1)
+    selected = df[is_selected].reset_index(drop=True)
+    matched_per = selected["Per"].to_numpy(dtype=np.float64)
+    missing = [p for p in periods_arr if not np.any(np.isclose(matched_per, p, rtol=rtol, atol=atol))]
+    if missing:
+        raise ValueError(f"Periods not found: {sorted(missing)}")
+    return selected
+
+
 def load_coefficients(csv_path: str, periods: Optional[Sequence[float]] = None) -> Coefficients:
     """
     Load `Coefficients` from the model's coefficient CSV (e.g. `CoefMean.csv`).
@@ -141,17 +163,15 @@ def load_coefficients(csv_path: str, periods: Optional[Sequence[float]] = None) 
     ----------
     csv_path : str
     periods : sequence of float, optional
-        Restrict to these periods (must match `Per` values in the file
-        exactly). Defaults to every period in the file, in file order.
-        Pass e.g. `periods=[0.01]` to get a single-period `Coefficients`
-        for use as `coef_pga`.
+        Restrict to these periods (matched to `Per` values in the file
+        with a small floating-point tolerance -- see `_select_periods`).
+        Defaults to every period in the file, in file order. Pass e.g.
+        `periods=[0.01]` to get a single-period `Coefficients` for use as
+        `coef_pga`.
     """
     df = pd.read_csv(csv_path)
     if periods is not None:
-        df = df[df["Per"].isin(periods)].reset_index(drop=True)
-        missing = sorted(set(periods) - set(df["Per"].tolist()))
-        if missing:
-            raise ValueError(f"Periods not found in {csv_path}: {missing}")
+        df = _select_periods(df, periods)
     return Coefficients(**{
         field: jnp.asarray(df[field].values, dtype=jnp.float64) for field in _COEF_FIELDS
     })

@@ -65,6 +65,24 @@ class Ilhan26Coefficients(NamedTuple):
     Vg: jnp.ndarray
 
 
+def _select_periods(df: pd.DataFrame, periods: Sequence[float], rtol: float = 1e-6, atol: float = 1e-9) -> pd.DataFrame:
+    """
+    Select the rows of `df` (must have a `Per` column) matching `periods`,
+    tolerant of small floating-point noise -- see
+    `median_core._select_periods` (same logic, duplicated here to keep
+    this module independent of `median_core`).
+    """
+    per_values = df["Per"].to_numpy(dtype=np.float64)
+    periods_arr = np.asarray(list(periods), dtype=np.float64)
+    is_selected = np.any(np.isclose(per_values[:, None], periods_arr[None, :], rtol=rtol, atol=atol), axis=1)
+    selected = df[is_selected].reset_index(drop=True)
+    matched_per = selected["Per"].to_numpy(dtype=np.float64)
+    missing = [p for p in periods_arr if not np.any(np.isclose(matched_per, p, rtol=rtol, atol=atol))]
+    if missing:
+        raise ValueError(f"Periods not found: {sorted(missing)}")
+    return selected
+
+
 def load_ilhan26_coefficients(
     csv_path: str, periods: Optional[Sequence[float]] = None
 ) -> Ilhan26Coefficients:
@@ -77,28 +95,23 @@ def load_ilhan26_coefficients(
     periods : sequence of float, optional
         Restrict to (and order by) these periods -- pass the **same**
         `periods` used for `median_core.load_coefficients` so the two
-        coefficient sets line up period-for-period. Every requested
-        period must match a `Per` value in the file exactly; this loader
-        does not interpolate (unlike the frequency-domain EAS/PSA
-        coefficients in `nl_models.py`, `ILHAN26_Coeffs.csv` is already
-        finely enough sampled -- 124 periods from 0.001 to 10 s -- that
-        every period in the CKBKNB26 median model's own coefficient file
-        matches exactly).
+        coefficient sets line up period-for-period. Matched to `Per`
+        values in the file with a small floating-point tolerance (see
+        `_select_periods`) rather than requiring an exact match: the
+        frequency-domain EAS/PSA coefficients elsewhere in this codebase
+        need interpolation, but `ILHAN26_Coeffs.csv` is already finely
+        enough sampled -- 124 periods from 0.001 to 10 s -- that every
+        period in the CKBKNB26 median model's own coefficient file has a
+        matching entry here to begin with.
 
     Raises
     ------
     ValueError
-        If any requested period has no exact match in the file.
+        If any requested period has no match (within tolerance) in the file.
     """
     df = pd.read_csv(csv_path).rename(columns={"V_f": "Vf", "V_g": "Vg"})
     if periods is not None:
-        df = df[df["Per"].isin(periods)].reset_index(drop=True)
-        missing = sorted(set(periods) - set(df["Per"].tolist()))
-        if missing:
-            raise ValueError(
-                f"Periods not found in {csv_path}: {missing} (no interpolation "
-                "implemented here -- see load_ilhan26_coefficients docstring)"
-            )
+        df = _select_periods(df, periods)
     return Ilhan26Coefficients(**{
         field: jnp.asarray(df[field].values, dtype=jnp.float64) for field in _ILHAN26_FIELDS
     })
