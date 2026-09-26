@@ -210,7 +210,8 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     make_spline_coeff_guide(spline_basis, "tau_1", monotonic=None, init_mu=-0.7)
 
     # --- geology subregion random effect (WUS only) ---
-    make_spline_coeff_guide(spline_basis, "sigma_region", monotonic=None, init_mu=-0.7)
+    if include_region:
+        make_spline_coeff_guide(spline_basis, "sigma_region", monotonic=None, init_mu=-0.7)
 
     estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
     estimate_station_kappa = estimate_kappa in ("station", "hierarchical")
