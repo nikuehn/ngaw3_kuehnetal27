@@ -139,3 +139,46 @@ def load_psa_data(
     out.insert(0, 'motion_id', motion_ids)
 
     return out, periods_used, names_periods_used
+
+
+def prepare_nn_inputs(
+    data_used: pd.DataFrame,
+    depth_col: str = "ztor",
+    include_region: bool = False,
+) -> pd.DataFrame:
+    """
+    Build the predictor DataFrame expected by `nn_psa_model.predict`
+    (see `build_features`) from the record table `data_used` returned by
+    `prepare_data`. Row order is preserved.
+
+    Mapping
+    -------
+    magnitude -> M, rrup -> R, vs30 -> VS, `depth_col` -> Z,
+    F_rev -> Frev, F_nm -> Fnm, basin -> basin_id,
+    regional -> subregion_id (only if `include_region`),
+    vsmeas_id <- 1 if vs30_code_id not in [0, 1, 2] else 0 (same rule as
+    `vs30_measured` in `prepare_data`).
+
+    Parameters
+    ----------
+    data_used : DataFrame
+    depth_col : str
+        Column of `data_used` used as the NN's depth predictor Z
+        (default 'ztor'; use 'hypocenter_depth' if the NN was trained
+        with that instead).
+    include_region : bool
+        Add `subregion_id`. Must match `model.include_region`.
+    """
+    df = pd.DataFrame({
+        "M": data_used["magnitude"].to_numpy(),
+        "R": data_used["rrup"].to_numpy(),
+        "VS": data_used["vs30"].to_numpy(),
+        "vsmeas_id": np.where(data_used["vs30_code_id"].isin([0, 1, 2]), 0, 1),
+        "Z": data_used[depth_col].to_numpy(),
+        "Frev": data_used["F_rev"].to_numpy(),
+        "Fnm": data_used["F_nm"].to_numpy(),
+        "basin_id": data_used["basin"].to_numpy(),
+    })
+    if include_region:
+        df["subregion_id"] = data_used["regional"].to_numpy()
+    return df
