@@ -405,22 +405,22 @@ def predict(model: GMMNet, scaler: StandardScaler, df_x_new: pd.DataFrame) -> np
 # 7. Save / load
 # ---------------------------------------------------------------------------
 
-def save_model(model: GMMNet, scaler: StandardScaler, config: dict, dir_results: str) -> None:
+def save_model(model: GMMNet, scaler: StandardScaler, config: dict, dir_results: str, filestem: str) -> None:
     os.makedirs(dir_results, exist_ok=True)
-    eqx.tree_serialise_leaves(os.path.join(dir_results, "gmm_nn.eqx"), model)
-    joblib.dump(scaler, os.path.join(dir_results, "gmm_scaler.joblib"))
-    with open(os.path.join(dir_results, "gmm_config.json"), "w") as f:
+    eqx.tree_serialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model)
+    joblib.dump(scaler, os.path.join(dir_results, f"gmm_scalern_{filestem}.joblib"))
+    with open(os.path.join(dir_results, f"gmm_confin_{filestem}g.json"), "w") as f:
         json.dump(config, f)
 
 
-def load_model(dir_results: str, key: Optional[jax.Array] = None):
+def load_model(dir_results: str, filestem: str, key: Optional[jax.Array] = None):
     """
     Returns (model, scaler, config). `key` only seeds the template
     model's initial (soon-to-be-overwritten) weights before
     `eqx.tree_deserialise_leaves` fills in the trained values -- any
     key works.
     """
-    with open(os.path.join(dir_results, "gmm_config.json")) as f:
+    with open(os.path.join(dir_results, f"gmm_config_{filestem}.json")) as f:
         config = json.load(f)
 
     key = key if key is not None else jax.random.PRNGKey(0)
@@ -435,6 +435,6 @@ def load_model(dir_results: str, key: Optional[jax.Array] = None):
         region_emb_dim=config.get("region_emb_dim", 4),
         n_region_cats=config.get("n_region_cats"),
     )
-    model = eqx.tree_deserialise_leaves(os.path.join(dir_results, "gmm_nn.eqx"), model_template)
-    scaler = joblib.load(os.path.join(dir_results, "gmm_scaler.joblib"))
+    model = eqx.tree_deserialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model_template)
+    scaler = joblib.load(os.path.join(dir_results, f"gmm_scaler_{filestem}.joblib"))
     return model, scaler, config
