@@ -409,7 +409,7 @@ def save_model(model: GMMNet, scaler: StandardScaler, config: dict, dir_results:
     os.makedirs(dir_results, exist_ok=True)
     eqx.tree_serialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model)
     joblib.dump(scaler, os.path.join(dir_results, f"gmm_nn_scaler_{filestem}.joblib"))
-    with open(os.path.join(dir_results, f"gmm_nn_config_{filestem}g.json"), "w") as f:
+    with open(os.path.join(dir_results, f"gmm_nn_config_{filestem}.json"), "w") as f:
         json.dump(config, f)
 
 
