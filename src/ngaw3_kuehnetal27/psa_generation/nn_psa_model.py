@@ -408,8 +408,8 @@ def predict(model: GMMNet, scaler: StandardScaler, df_x_new: pd.DataFrame) -> np
 def save_model(model: GMMNet, scaler: StandardScaler, config: dict, dir_results: str, filestem: str) -> None:
     os.makedirs(dir_results, exist_ok=True)
     eqx.tree_serialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model)
-    joblib.dump(scaler, os.path.join(dir_results, f"gmm_scalern_{filestem}.joblib"))
-    with open(os.path.join(dir_results, f"gmm_confin_{filestem}g.json"), "w") as f:
+    joblib.dump(scaler, os.path.join(dir_results, f"gmm_nn_scaler_{filestem}.joblib"))
+    with open(os.path.join(dir_results, f"gmm_nn_config_{filestem}g.json"), "w") as f:
         json.dump(config, f)
 
 
@@ -420,7 +420,7 @@ def load_model(dir_results: str, filestem: str, key: Optional[jax.Array] = None)
     `eqx.tree_deserialise_leaves` fills in the trained values -- any
     key works.
     """
-    with open(os.path.join(dir_results, f"gmm_config_{filestem}.json")) as f:
+    with open(os.path.join(dir_results, f"gmm_nn_config_{filestem}.json")) as f:
         config = json.load(f)
 
     key = key if key is not None else jax.random.PRNGKey(0)
@@ -436,5 +436,5 @@ def load_model(dir_results: str, filestem: str, key: Optional[jax.Array] = None)
         n_region_cats=config.get("n_region_cats"),
     )
     model = eqx.tree_deserialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model_template)
-    scaler = joblib.load(os.path.join(dir_results, f"gmm_scaler_{filestem}.joblib"))
+    scaler = joblib.load(os.path.join(dir_results, f"gmm_nn_scaler_{filestem}.joblib"))
     return model, scaler, config
