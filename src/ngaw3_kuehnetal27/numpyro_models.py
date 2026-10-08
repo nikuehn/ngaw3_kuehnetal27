@@ -5,6 +5,9 @@ Assembles WUS (and, if `global_dict` is given, global) coefficients via
 `coefficient_sharing.py` (config-driven shared vs. dataset-local
 sampling, always same prior *structure* for both datasets), then calls
 `calculate_median_training` once per dataset.
+
+`model_eas(..., zerosumnormal=True)` swaps the Normal(0, 1) raw random
+effects for ZeroSumNormal(1) ones (see the docstring of `model_eas`).
 """
 import numpy as np
 import jax
@@ -53,7 +56,26 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
               estimate_cvs=True, amp1d_dict=None, prior_config=None,
-              include_region=True):
+              include_region=True, zerosumnormal=False):
+    """
+    zerosumnormal : bool, default False
+        False: raw random effects are iid Normal(0, 1) (original behavior).
+        True : raw random effects (deltaS_raw, deltaB_raw, deltaB_attn_raw,
+        c_region_raw, and the kappa raw terms ln_kappa_{region,station}_raw,
+        plus the *_gl versions when `global_dict` is given) are
+        ZeroSumNormal(1), i.e. constrained to sum to zero over stations /
+        events / subregions (separately for every frequency). This removes
+        the collinearity with the intercept and is usually more efficient
+        for NUTS.
+
+        Shape note: under ZeroSumNormal the *_raw sample sites have shape
+        (n_freq, n) (event axis last), not (n, n_freq). They are transposed
+        right after sampling, so deltaS / deltaB / deltaB_attn / c_region
+        (and the *_gl versions) keep their usual (n, n_freq) shape.
+        Kappa sites are (n,) either way.
+
+    Must be matched by the same `zerosumnormal` value in `guide_eas`.
+    """
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
     prior_config = prior_config if prior_config is not None else DEFAULT_PRIOR
@@ -293,8 +315,12 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         if estimate_region_kappa:
             sigma_ln_kappa_region = numpyro.sample("sigma_ln_kappa_region",
                                                      dist.Exponential(*prior_config["sigma_ln_kappa_region"]))
-            with numpyro.plate("plate_region", n_subregion, dim=-1):
-                ln_kappa_region_raw = numpyro.sample("ln_kappa_region_raw", dist.Normal(0, 1))
+            if zerosumnormal:
+                ln_kappa_region_raw = numpyro.sample(
+                    "ln_kappa_region_raw", dist.ZeroSumNormal(1.0, event_shape=(n_subregion,)))
+            else:
+                with numpyro.plate("plate_region", n_subregion, dim=-1):
+                    ln_kappa_region_raw = numpyro.sample("ln_kappa_region_raw", dist.Normal(0, 1))
             m_region = numpyro.deterministic("m_region", jnp.exp(ln_kappa_region_raw * sigma_ln_kappa_region))
             m_region_id = m_region[subregion_id]
 
@@ -308,8 +334,12 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         if estimate_station_kappa:
             sigma_ln_kappa_station = numpyro.sample("sigma_ln_kappa_station",
                                                       dist.Exponential(*prior_config["sigma_ln_kappa_station"]))
-            with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
-                ln_kappa_station_raw = numpyro.sample("ln_kappa_station_raw", dist.Normal(0, 1))
+            if zerosumnormal:
+                ln_kappa_station_raw = numpyro.sample(
+                    "ln_kappa_station_raw", dist.ZeroSumNormal(1.0, event_shape=(n_stat,)))
+            else:
+                with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
+                    ln_kappa_station_raw = numpyro.sample("ln_kappa_station_raw", dist.Normal(0, 1))
             m_station = numpyro.deterministic("m_station", jnp.exp(ln_kappa_station_raw * sigma_ln_kappa_station))
             m_station_id = m_station[stat_id]
 
@@ -344,17 +374,39 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         nu_rec = numpyro.sample("nu_rec", dist.Gamma(*prior_config["nu_rec"]))
 
-        if include_region:
-            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
-                c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
-
-        with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
-
-        with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
+        if zerosumnormal:
+            # event axis last inside the frequency plate -> (n_freq, n)
+            if include_region:
+                c_region_raw = numpyro.sample(
+                    "c_region_raw", dist.ZeroSumNormal(1.0, event_shape=(n_subregion,)))
+            deltaS_raw = numpyro.sample(
+                "deltaS_raw", dist.ZeroSumNormal(1.0, event_shape=(n_stat,)))
+            deltaB_raw = numpyro.sample(
+                "deltaB_raw", dist.ZeroSumNormal(1.0, event_shape=(n_eq,)))
             if attn_eq:
-                deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
+                deltaB_attn_raw = numpyro.sample(
+                    "deltaB_attn_raw", dist.ZeroSumNormal(1.0, event_shape=(n_eq,)))
+        else:
+            if include_region:
+                with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                    c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
+
+            with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
+                deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
+
+            with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
+                deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
+                if attn_eq:
+                    deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
+
+    if zerosumnormal:
+        # back to (n, n_freq), as in the Normal parameterization
+        deltaS_raw = deltaS_raw.T
+        deltaB_raw = deltaB_raw.T
+        if attn_eq:
+            deltaB_attn_raw = deltaB_attn_raw.T
+        if include_region:
+            c_region_raw = c_region_raw.T
 
     deltaS = deltaS_raw * phi_s2s[vs_measured_id]
     deltaB = deltaB_raw * tau
@@ -499,13 +551,30 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             if attn_eq:
                 tau_attn_gl = numpyro.sample("tau_attn_gl", dist.HalfNormal(*prior_config["tau_attn_gl"]))
 
-            with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                deltaS_raw_gl = numpyro.sample("deltaS_raw_gl", dist.Normal(0, 1))
-
-            with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                deltaB_raw_gl = numpyro.sample("deltaB_raw_gl", dist.Normal(0, 1))
+            if zerosumnormal:
+                # event axis last inside the frequency plate -> (n_freq, n)
+                deltaS_raw_gl = numpyro.sample(
+                    "deltaS_raw_gl", dist.ZeroSumNormal(1.0, event_shape=(n_stat_gl,)))
+                deltaB_raw_gl = numpyro.sample(
+                    "deltaB_raw_gl", dist.ZeroSumNormal(1.0, event_shape=(n_eq_gl,)))
                 if attn_eq:
-                    deltaB_attn_raw_gl = numpyro.sample("deltaB_attn_raw_gl", dist.Normal(0, 1))
+                    deltaB_attn_raw_gl = numpyro.sample(
+                        "deltaB_attn_raw_gl", dist.ZeroSumNormal(1.0, event_shape=(n_eq_gl,)))
+            else:
+                with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
+                    deltaS_raw_gl = numpyro.sample("deltaS_raw_gl", dist.Normal(0, 1))
+
+                with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
+                    deltaB_raw_gl = numpyro.sample("deltaB_raw_gl", dist.Normal(0, 1))
+                    if attn_eq:
+                        deltaB_attn_raw_gl = numpyro.sample("deltaB_attn_raw_gl", dist.Normal(0, 1))
+
+        if zerosumnormal:
+            # back to (n, n_freq), as in the Normal parameterization
+            deltaS_raw_gl = deltaS_raw_gl.T
+            deltaB_raw_gl = deltaB_raw_gl.T
+            if attn_eq:
+                deltaB_attn_raw_gl = deltaB_attn_raw_gl.T
 
         deltaS_gl = numpyro.deterministic("deltaS_gl", deltaS_raw_gl * phi_s2s_gl)
         deltaB_gl = numpyro.deterministic("deltaB_gl", deltaB_raw_gl * tau_gl)

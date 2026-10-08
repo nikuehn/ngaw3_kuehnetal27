@@ -30,6 +30,31 @@ from ngaw3_kuehnetal27.coefficient_sharing_guide import (
 from ngaw3_kuehnetal27.median_core import ModelConstants
 
 
+def _zsn_guide_dist(name, batch_shape, n, init_scale=0.2):
+    """
+    Mean-field guide distribution for a ZeroSumNormal model site of event
+    shape (n,) (batch shape `batch_shape`, e.g. (n_freq,) inside the
+    frequency plate).
+
+    Normal(loc, scale) on the n-1 free coordinates, mapped onto the
+    zero-sum subspace with ZeroSumTransform -- the same construction
+    AutoNormal would use. A plain Normal guide cannot be used here: its
+    samples would not sum to zero, i.e. would lie outside the support of
+    the model site.
+
+    The params are `loc_{name}` / `scale_{name}`, as for the Normal guides,
+    but with trailing dimension n-1 instead of n.
+    """
+    shape = tuple(batch_shape) + (n - 1,)
+    loc = numpyro.param(f"loc_{name}", jnp.zeros(shape))
+    scale = numpyro.param(f"scale_{name}", init_scale * jnp.ones(shape),
+                          constraint=dist.constraints.positive)
+    return dist.TransformedDistribution(
+        dist.Normal(loc, scale).to_event(1),
+        dist.transforms.ZeroSumTransform(1),
+    )
+
+
 def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               Y=None, dist_cell=None, attn_eq=True,
               ref_basin_id=1,
@@ -45,7 +70,14 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
               estimate_cvs=True, amp1d_dict=None, prior_config=None,
-              include_region=True):
+              include_region=True, zerosumnormal=False):
+    """
+    Guide for `model_eas`. `zerosumnormal` must match the value used in
+    `model_eas`. With zerosumnormal=True the random-effect guide sites are
+    mean-field Normals on the n-1 free coordinates of each ZeroSumNormal
+    site (see `_zsn_guide_dist`), so their loc_*/scale_* params have shape
+    (n_freq, n-1) (kappa: (n-1,)) instead of (n, n_freq) (kappa: (n,)).
+    """
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
 
@@ -229,24 +261,32 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 dist.Delta(v=numpyro.param("loc_log_sigma_ln_kappa_region", -2.0)),
                 transforms=dist.transforms.ExpTransform(),
             ))
-            with numpyro.plate("plate_region", n_subregion, dim=-1):
-                numpyro.sample("ln_kappa_region_raw", dist.Normal(
-                    loc=numpyro.param("loc_ln_kappa_region_raw", jnp.zeros(n_subregion)),
-                    scale=numpyro.param("scale_ln_kappa_region_raw", 0.2 * jnp.ones(n_subregion),
-                                        constraint=dist.constraints.positive),
-                ))
+            if zerosumnormal:
+                numpyro.sample("ln_kappa_region_raw",
+                               _zsn_guide_dist("ln_kappa_region_raw", (), n_subregion))
+            else:
+                with numpyro.plate("plate_region", n_subregion, dim=-1):
+                    numpyro.sample("ln_kappa_region_raw", dist.Normal(
+                        loc=numpyro.param("loc_ln_kappa_region_raw", jnp.zeros(n_subregion)),
+                        scale=numpyro.param("scale_ln_kappa_region_raw", 0.2 * jnp.ones(n_subregion),
+                                            constraint=dist.constraints.positive),
+                    ))
 
         if estimate_station_kappa:
             numpyro.sample("sigma_ln_kappa_station", dist.TransformedDistribution(
                 dist.Delta(v=numpyro.param("loc_log_sigma_ln_kappa_station", -2.0)),
                 transforms=dist.transforms.ExpTransform(),
             ))
-            with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
-                numpyro.sample("ln_kappa_station_raw", dist.Normal(
-                    loc=numpyro.param("loc_ln_kappa_station_raw", jnp.zeros(n_stat)),
-                    scale=numpyro.param("scale_ln_kappa_station_raw", 0.2 * jnp.ones(n_stat),
-                                        constraint=dist.constraints.positive),
-                ))
+            if zerosumnormal:
+                numpyro.sample("ln_kappa_station_raw",
+                               _zsn_guide_dist("ln_kappa_station_raw", (), n_stat))
+            else:
+                with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
+                    numpyro.sample("ln_kappa_station_raw", dist.Normal(
+                        loc=numpyro.param("loc_ln_kappa_station_raw", jnp.zeros(n_stat)),
+                        scale=numpyro.param("scale_ln_kappa_station_raw", 0.2 * jnp.ones(n_stat),
+                                            constraint=dist.constraints.positive),
+                    ))
 
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         numpyro.sample("nu_rec", dist.TransformedDistribution(
@@ -254,33 +294,43 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             transforms=dist.transforms.ExpTransform(),
         ))
 
-        if include_region:
-            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
-                numpyro.sample("c_region_raw", dist.Normal(
-                    loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
-                    scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
-                                        constraint=dist.constraints.positive),
-                ))
-
-        with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            numpyro.sample("deltaS_raw", dist.Normal(
-                loc=numpyro.param("loc_deltaS_raw", jnp.zeros((n_stat, n_freq))),
-                scale=numpyro.param("scale_deltaS_raw", 0.2 * jnp.ones((n_stat, n_freq)),
-                                     constraint=dist.constraints.positive),
-            ))
-
-        with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            numpyro.sample("deltaB_raw", dist.Normal(
-                loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
-                scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
-                                     constraint=dist.constraints.positive),
-            ))
+        if zerosumnormal:
+            if include_region:
+                numpyro.sample("c_region_raw",
+                               _zsn_guide_dist("c_region_raw", (n_freq,), n_subregion))
+            numpyro.sample("deltaS_raw", _zsn_guide_dist("deltaS_raw", (n_freq,), n_stat))
+            numpyro.sample("deltaB_raw", _zsn_guide_dist("deltaB_raw", (n_freq,), n_eq))
             if attn_eq:
-                numpyro.sample("deltaB_attn_raw", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
-                    scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
+                numpyro.sample("deltaB_attn_raw",
+                               _zsn_guide_dist("deltaB_attn_raw", (n_freq,), n_eq))
+        else:
+            if include_region:
+                with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                    numpyro.sample("c_region_raw", dist.Normal(
+                        loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
+                        scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
+                                            constraint=dist.constraints.positive),
+                    ))
+
+            with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
+                numpyro.sample("deltaS_raw", dist.Normal(
+                    loc=numpyro.param("loc_deltaS_raw", jnp.zeros((n_stat, n_freq))),
+                    scale=numpyro.param("scale_deltaS_raw", 0.2 * jnp.ones((n_stat, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
+
+            with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
+                numpyro.sample("deltaB_raw", dist.Normal(
+                    loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
+                    scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
+                                         constraint=dist.constraints.positive),
+                ))
+                if attn_eq:
+                    numpyro.sample("deltaB_attn_raw", dist.Normal(
+                        loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
+                        scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
+                                             constraint=dist.constraints.positive),
+                    ))
 
     # ------------------------------------------------------------------
     # global data (optional)
@@ -317,25 +367,34 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                     transforms=dist.transforms.ExpTransform(),
                 ))
 
-            with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                numpyro.sample("deltaS_raw_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaS_raw_gl", jnp.zeros((n_stat_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaS_raw_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
-                                         constraint=dist.constraints.positive),
-                ))
-
-            with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                numpyro.sample("deltaB_raw_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaB_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
-                                         constraint=dist.constraints.positive),
-                ))
+            if zerosumnormal:
+                numpyro.sample("deltaS_raw_gl",
+                               _zsn_guide_dist("deltaS_raw_gl", (n_freq,), n_stat_gl))
+                numpyro.sample("deltaB_raw_gl",
+                               _zsn_guide_dist("deltaB_raw_gl", (n_freq,), n_eq_gl))
                 if attn_eq:
-                    numpyro.sample("deltaB_attn_raw_gl", dist.Normal(
-                        loc=numpyro.param("loc_deltaB_attn_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
-                        scale=numpyro.param("scale_deltaB_attn_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                    numpyro.sample("deltaB_attn_raw_gl",
+                                   _zsn_guide_dist("deltaB_attn_raw_gl", (n_freq,), n_eq_gl))
+            else:
+                with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
+                    numpyro.sample("deltaS_raw_gl", dist.Normal(
+                        loc=numpyro.param("loc_deltaS_raw_gl", jnp.zeros((n_stat_gl, n_freq))),
+                        scale=numpyro.param("scale_deltaS_raw_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
                                              constraint=dist.constraints.positive),
                     ))
+
+                with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
+                    numpyro.sample("deltaB_raw_gl", dist.Normal(
+                        loc=numpyro.param("loc_deltaB_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                        scale=numpyro.param("scale_deltaB_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                                             constraint=dist.constraints.positive),
+                    ))
+                    if attn_eq:
+                        numpyro.sample("deltaB_attn_raw_gl", dist.Normal(
+                            loc=numpyro.param("loc_deltaB_attn_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                            scale=numpyro.param("scale_deltaB_attn_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                                                 constraint=dist.constraints.positive),
+                        ))
 
 
 def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
