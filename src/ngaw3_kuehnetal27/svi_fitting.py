@@ -15,6 +15,8 @@ import numpy as np
 import numpyro
 import optax
 from numpyro import handlers
+import numpyro.distributions as dist
+from numpyro.distributions.transforms import ZeroSumTransform
 from numpyro.infer import SVI, Trace_ELBO
 from ngaw3_kuehnetal27.utils import smooth_trilinear_ramp_repar
 from ngaw3_kuehnetal27.median_core import ModelConstants
@@ -127,6 +129,35 @@ def to_jax_arrays(obj):
         return obj
 
 
+def zsn_marginal_sd(scale):
+    """
+    Per-element standard deviation of a ZeroSumNormal guide site.
+
+    The guide of a ZeroSumNormal site (see `_zsn_guide_dist` in
+    numpyro_guides.py) is a mean-field Normal with scale `scale`, shape
+    (..., n-1), on the n-1 free coordinates, mapped to n zero-sum values by
+    the linear ZeroSumTransform. With Jacobian J (n x n-1) the variance of
+    element i is sum_k J[i, k]^2 * scale[k]^2.
+
+    Returns an array of shape (..., n).
+    """
+    scale = jnp.asarray(scale)
+    n = scale.shape[-1] + 1
+    jac = jax.jacfwd(ZeroSumTransform(1))(jnp.zeros(n - 1))  # (n, n-1)
+    return jnp.sqrt((scale ** 2) @ (jac ** 2).T)
+
+
+def _is_zsn_guide_site(fn) -> bool:
+    """True if a guide site's distribution is mapped through ZeroSumTransform."""
+    while fn is not None:
+        if isinstance(fn, dist.TransformedDistribution) and any(
+            isinstance(t, ZeroSumTransform) for t in fn.transforms
+        ):
+            return True
+        fn = getattr(fn, "base_dist", None)
+    return False
+
+
 def resolve_svi_site_values(
     model: Callable,
     guide: Callable,
@@ -144,6 +175,21 @@ def resolve_svi_site_values(
     site_values = {
         name: site["value"] for name, site in guide_trace.items() if site["type"] == "sample"
     }
+
+    # ZeroSumNormal guide sites (zerosumnormal=True): loc_{site} is already a
+    # valid (zero-sum) value of the site, with the sample-site layout
+    # (n_freq, n) (kappa: (n,)), so the substitution below works as is. The
+    # scale_{site} params, however, are scales of the n-1 free coordinates;
+    # convert them to per-element standard deviations and to the (n, n_freq)
+    # layout of the Normal guides, so everything below is unchanged.
+    zsn_sites = [name for name, site in guide_trace.items()
+                 if site["type"] == "sample" and _is_zsn_guide_site(site["fn"])]
+    svi_params = dict(svi_params)
+    for name in zsn_sites:
+        key = f"scale_{name}"
+        if key in svi_params:
+            sd = zsn_marginal_sd(svi_params[key])
+            svi_params[key] = sd.T if sd.ndim == 2 else sd
 
     # Swap in each stochastic site's fitted location (and attach its
     # fitted spread) BEFORE recomputing model-side deterministics --
@@ -172,6 +218,11 @@ def resolve_svi_site_values(
         name: site["value"] for name, site in model_trace.items() if site["type"] == "deterministic"
     }
     site_values.update(deterministics)
+
+    # same (n, n_freq) layout of the raw random effects as with Normal sites
+    for name in zsn_sites:
+        if site_values[name].ndim == 2:
+            site_values[name] = site_values[name].T
 
     # uncertainty in random effects
     M_model = jnp.array(data_dict["X_eq"][:,0])

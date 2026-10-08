@@ -36,23 +36,32 @@ def _zsn_guide_dist(name, batch_shape, n, init_scale=0.2):
     shape (n,) (batch shape `batch_shape`, e.g. (n_freq,) inside the
     frequency plate).
 
-    Normal(loc, scale) on the n-1 free coordinates, mapped onto the
+    A plain Normal guide cannot be used on such a site: its samples would
+    not sum to zero, i.e. would lie outside the support of the model site.
+    Instead, a Normal on the n-1 free coordinates is mapped onto the
     zero-sum subspace with ZeroSumTransform -- the same construction
-    AutoNormal would use. A plain Normal guide cannot be used here: its
-    samples would not sum to zero, i.e. would lie outside the support of
-    the model site.
+    AutoNormal would use.
 
-    The params are `loc_{name}` / `scale_{name}`, as for the Normal guides,
-    but with trailing dimension n-1 instead of n.
+    Params (same naming as the Normal guides):
+      loc_{name}   shape batch_shape + (n,), constrained to sum to zero
+                   over the last axis. Like loc_ of the Normal guides it is
+                   the location of the site itself, i.e. a valid value of
+                   the model site (usable directly for substitution or as an
+                   init value). It is stored in the constrained space; the
+                   optimizer works on its n-1 free coordinates.
+      scale_{name} shape batch_shape + (n-1,), positive. This is the scale
+                   of the Normal on the n-1 free coordinates, NOT a
+                   per-element standard deviation of the site; use
+                   `zsn_marginal_sd` (svi_fitting.py) to get that.
     """
-    shape = tuple(batch_shape) + (n - 1,)
-    loc = numpyro.param(f"loc_{name}", jnp.zeros(shape))
-    scale = numpyro.param(f"scale_{name}", init_scale * jnp.ones(shape),
+    transform = dist.transforms.ZeroSumTransform(1)
+    loc = numpyro.param(f"loc_{name}", jnp.zeros(tuple(batch_shape) + (n,)),
+                        constraint=dist.constraints.zero_sum(1))
+    scale = numpyro.param(f"scale_{name}", init_scale * jnp.ones(tuple(batch_shape) + (n - 1,)),
                           constraint=dist.constraints.positive)
-    return dist.TransformedDistribution(
-        dist.Normal(loc, scale).to_event(1),
-        dist.transforms.ZeroSumTransform(1),
-    )
+    # transform(loc_free) == loc exactly (the transform is linear and loc sums to zero)
+    loc_free = transform.inv(loc)
+    return dist.TransformedDistribution(dist.Normal(loc_free, scale).to_event(1), transform)
 
 
 def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
@@ -75,8 +84,10 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     Guide for `model_eas`. `zerosumnormal` must match the value used in
     `model_eas`. With zerosumnormal=True the random-effect guide sites are
     mean-field Normals on the n-1 free coordinates of each ZeroSumNormal
-    site (see `_zsn_guide_dist`), so their loc_*/scale_* params have shape
-    (n_freq, n-1) (kappa: (n-1,)) instead of (n, n_freq) (kappa: (n,)).
+    site (see `_zsn_guide_dist`). Their loc_* params are zero-sum values of
+    shape (n_freq, n) (kappa: (n,)), i.e. the sample-site shape, which is
+    transposed relative to the Normal guide's (n, n_freq); their scale_*
+    params have shape (n_freq, n-1) (kappa: (n-1,)).
     """
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
