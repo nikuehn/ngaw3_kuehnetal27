@@ -22,12 +22,28 @@ Categorical (learned embedding):
     subregion_id : 0-(n_region-1), optional         -> Embedding(n_region_cats, region_emb_dim),
                      only if include_region=True
 
-Ignored here (invariant in this simulation):
-    Dip, FW, Rx, Ry0
+Hanging-wall geometry (only if include_hw=True):
+    Dip          : fault dip (deg)                       -> raw
+    FW           : down-dip width W (km)                 -> ln(FW)
+    Rx           : horizontal distance from top edge     -> raw (signed, km)
+    Ry0          : along-strike distance off rupture end -> raw (km)
+    Rx > 0       : hanging-wall indicator                -> {0, 1}
+                     (the HW term switches on at Rx = 0; the indicator lets
+                     the network represent that step instead of smoothing it)
+    With include_hw=False these four columns are ignored (they are only
+    constant/irrelevant in the footwall-only simulation).
 
 Output
 ------
     ln(PSA) at 21 periods  (shape: [batch, 21])
+
+Hanging-wall handling
+---------------------
+`include_hw=False` (default) reproduces the previous behaviour. With
+`include_hw=True` the continuous input grows from 8 to 13 features; the
+flag is stored on the model (like `include_region`) and in the saved config,
+so `predict` / `load_model` cannot be mismatched against training. Configs
+saved before this option existed load as include_hw=False.
 
 Region handling
 ----------------
@@ -42,6 +58,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from typing import Optional, Sequence, Tuple
 
 import equinox as eqx
@@ -61,19 +78,25 @@ Array = jnp.ndarray
 # 1. Feature engineering
 # ---------------------------------------------------------------------------
 
+HW_FEATURE_NAMES = ("Dip", "ln_FW", "Rx", "Ry0", "HW_flag")
+
+
 def build_features(
     df_x: pd.DataFrame,
     include_region: bool = False,
+    include_hw: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Continuous + binary features, shape (N, 8):
         M, ln(R), R, ln(VS), ln(VS) * vsmeas, Z, Frev, Fnm
+    If `include_hw`, five columns are appended, shape (N, 13):
+        Dip, ln(FW), Rx, Ry0, 1[Rx > 0]
     basin_id (and, if `include_region`, subregion_id) returned
     separately for embedding.
 
     Returns
     -------
-    cont : ndarray, shape (N, 8), float32
+    cont : ndarray, shape (N, 8) or (N, 13) if include_hw, float32
     basin_id : ndarray, shape (N,), int32
     region_id : ndarray, shape (N,), int32, or None if not include_region
     """
@@ -81,7 +104,7 @@ def build_features(
     ln_VS = np.log(df_x["VS"].values.clip(1.0))
     vsmeas = df_x["vsmeas_id"].values.astype(np.float32)
 
-    cont = np.column_stack([
+    columns = [
         df_x["M"].values,
         np.log(R),          # geometric spreading proxy
         R,                   # anelastic attenuation proxy
@@ -90,7 +113,17 @@ def build_features(
         df_x["Z"].values,
         df_x["Frev"].values,
         df_x["Fnm"].values,
-    ]).astype(np.float32)
+    ]
+    if include_hw:
+        Rx = df_x["Rx"].values
+        columns += [
+            df_x["Dip"].values,
+            np.log(df_x["FW"].values.clip(0.1)),
+            Rx,
+            df_x["Ry0"].values,
+            (Rx > 0).astype(np.float32),   # hanging-wall side indicator
+        ]
+    cont = np.column_stack(columns).astype(np.float32)
 
     basin_id = df_x["basin_id"].values.astype(np.int32)
     region_id = df_x["subregion_id"].values.astype(np.int32) if include_region else None
@@ -123,12 +156,16 @@ class GMMNet(eqx.Module):
                       include_region)
     n_region_cats   : number of subregion categories (required if
                       include_region)
+    include_hw      : if True, the continuous input includes the hanging-wall
+                      geometry features (n_cont must be 13 instead of 8);
+                      stored so `predict` builds matching features
     """
     basin_embedding: eqx.nn.Embedding
     region_embedding: Optional[eqx.nn.Embedding]
     layers: list
     n_cont: int = eqx.field(static=True)
     include_region: bool = eqx.field(static=True)
+    include_hw: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -141,12 +178,14 @@ class GMMNet(eqx.Module):
         include_region: bool = False,
         region_emb_dim: int = 4,
         n_region_cats: Optional[int] = None,
+        include_hw: bool = False,
     ):
         if include_region and n_region_cats is None:
             raise ValueError("n_region_cats must be given when include_region=True")
 
         self.n_cont = n_cont
         self.include_region = include_region
+        self.include_hw = include_hw
 
         n_embed_keys = 2 if include_region else 1
         keys = jax.random.split(key, len(hidden_dims) + 1 + n_embed_keys)
@@ -277,6 +316,7 @@ def train(
     basin_emb_dim: int = 4,
     include_region: bool = False,
     region_emb_dim: int = 4,
+    include_hw: bool = False,
     n_epochs: int = 100,
     batch_size: int = 1024,
     lr: float = 1e-3,
@@ -285,6 +325,11 @@ def train(
 ):
     """
     Train `GMMNet` on (df_x, df_psa).
+
+    include_hw : if True, Dip, FW, Rx and Ry0 (plus a hanging-wall
+        indicator) are added to the network input. Use this when df_x
+        contains HW scenarios (e.g. footwall + `sample_scenarios_hw`
+        stacked); with False they are ignored.
 
     Returns
     -------
@@ -297,8 +342,17 @@ def train(
     """
     key = jax.random.PRNGKey(seed)
 
+    if not include_hw and all(c in df_x.columns for c in ("Dip", "FW", "Rx", "Ry0")):
+        if df_x[["Dip", "FW", "Rx", "Ry0"]].nunique().max() > 1:
+            warnings.warn(
+                "df_x has varying Dip/FW/Rx/Ry0 but include_hw=False: these "
+                "columns are ignored, so hanging-wall effects cannot be learned."
+            )
+
     # --- features & targets ---
-    X_cont_np, X_basin_np, X_region_np = build_features(df_x, include_region=include_region)
+    X_cont_np, X_basin_np, X_region_np = build_features(
+        df_x, include_region=include_region, include_hw=include_hw
+    )
     y_np = build_targets(df_psa)
 
     # --- train/test split ---
@@ -321,7 +375,7 @@ def train(
     X_region_tr = X_region[idx_tr] if include_region else None
     X_region_te = X_region[idx_te] if include_region else None
 
-    n_cont = X_cont.shape[1]  # 8
+    n_cont = X_cont.shape[1]  # 8, or 13 if include_hw
 
     # --- model & optimiser ---
     key, subkey = jax.random.split(key)
@@ -337,6 +391,7 @@ def train(
         include_region=include_region,
         region_emb_dim=region_emb_dim,
         n_region_cats=n_region_cats,
+        include_hw=include_hw,
     )
 
     # Cosine-decay schedule with warm restarts works well here
@@ -378,6 +433,7 @@ def train(
         include_region=include_region,
         region_emb_dim=region_emb_dim,
         n_region_cats=n_region_cats,
+        include_hw=include_hw,
     )
     return model, scaler, config
 
@@ -389,11 +445,12 @@ def train(
 def predict(model: GMMNet, scaler: StandardScaler, df_x_new: pd.DataFrame) -> np.ndarray:
     """
     Returns ln(PSA) predictions, shape (N, 21). Reads `include_region`
-    off `model` itself, so there's no way to accidentally mismatch it
-    against how the model was trained.
+    and `include_hw` off `model` itself, so there's no way to accidentally
+    mismatch them against how the model was trained. A model trained with
+    include_hw=True needs Dip, FW, Rx and Ry0 in `df_x_new`.
     """
     X_cont_np, X_basin_np, X_region_np = build_features(
-        df_x_new, include_region=model.include_region
+        df_x_new, include_region=model.include_region, include_hw=model.include_hw
     )
     X_cont_np = scaler.transform(X_cont_np)
     region_arr = jnp.array(X_region_np) if model.include_region else None
@@ -434,6 +491,7 @@ def load_model(dir_results: str, filestem: str, key: Optional[jax.Array] = None)
         include_region=config.get("include_region", False),
         region_emb_dim=config.get("region_emb_dim", 4),
         n_region_cats=config.get("n_region_cats"),
+        include_hw=config.get("include_hw", False),
     )
     model = eqx.tree_deserialise_leaves(os.path.join(dir_results, f"gmm_nn_{filestem}.eqx"), model_template)
     scaler = joblib.load(os.path.join(dir_results, f"gmm_nn_scaler_{filestem}.joblib"))
