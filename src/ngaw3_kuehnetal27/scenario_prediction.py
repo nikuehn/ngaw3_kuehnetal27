@@ -552,3 +552,226 @@ def sample_scenarios(
         amp1d_dataset=amp1d_dataset, amp1d_target_name=amp1d_target_name,
     )
     return df_scenarios, ln_median
+
+
+
+"""
+Hanging-wall (HW) scenario sampler -- additions for scenario_prediction.py.
+
+Design (all geometry variables are model inputs, so physical consistency is
+loose except for Rrup, which is derived from the geometry):
+
+  M, fault type, Vs30, categoricals  -> independent
+  Dip | fault type                   -> uniform in a type-specific range
+  Ztor | M, fault type               -> truncated normal around the CY14
+                                        E[Ztor | M, mechanism]
+  W | M, fault type                  -> Wells & Coppersmith (1994) + scatter,
+                                        optionally capped by seismogenic depth
+  Rx | W, Dip                        -> sampled relative to R2 = 3*W*cos(Dip)
+  Ry0                                -> point mass at 0 + window (no L needed)
+  Rrup                               -> derived (Kaklamanos et al. 2011,
+                                        Eqs. 14-17); units are km throughout
+
+Fault type coding follows `sample_scenarios`: 0 = strike-slip, 1 = reverse,
+2 = normal.
+"""
+
+# Wells & Coppersmith (1994), Table 2A: log10 W = a + b*M, scatter in log10 units
+# (a, b are from Kaklamanos et al. 2011 Eq. 2; sigma values are from memory --
+# check against W&C94 Table 2A).
+WC94_WIDTH = {0: (-0.76, 0.27, 0.14), 1: (-1.61, 0.41, 0.15), 2: (-1.14, 0.35, 0.12)}
+
+HW_SAMPLE_BOUNDS: Dict[str, tuple] = {
+    "M": (5.0, 8.0),
+    "VS": (200.0, 1100.0),
+}
+
+# Loose, overlapping dip ranges (degrees) per fault type
+HW_DIP_RANGE: Dict[int, tuple] = {0: (60.0, 90.0), 1: (15.0, 70.0), 2: (40.0, 75.0)}
+
+
+def ztor_mean_cy14(M, Frev):
+    """E[Ztor | M, mechanism] (km), same relation as in the Campbell et al. port."""
+    ztor_rv = jnp.clip(2.704 - 1.226 * jnp.clip(M - 5.849, 0.0, None), 0.0, None) ** 2
+    ztor_other = jnp.clip(2.673 - 1.136 * jnp.clip(M - 4.970, 0.0, None), 0.0, None) ** 2
+    return jnp.where(Frev == 1, ztor_rv, ztor_other)
+
+
+def rupture_distance(Rx, Ry0, Ztor, Dip, W):
+    """
+    Closest distance to a planar rupture from a surface site (km, degrees).
+
+    Equivalent to Kaklamanos et al. (2011) Eqs. 14-17 (zones A/B/C), written
+    as a clamp in the along-dip coordinate; Ry0 is their R_Y. Works for
+    Rx < 0 (footwall, always zone A) and for Dip = 90 (reduces to Eq. 21).
+    """
+    d = jnp.deg2rad(Dip)
+    perp = Rx * jnp.sin(d) + Ztor * jnp.cos(d)      # distance to the plane
+    s = Rx * jnp.cos(d) - Ztor * jnp.sin(d)         # along-dip coordinate of the site
+    s_out = s - jnp.clip(s, 0.0, W)                 # overshoot beyond top/bottom edge
+    return jnp.sqrt(perp**2 + s_out**2 + Ry0**2)
+
+
+def _sample_dip(key, fault_type, dip_range=None):
+    dr = {**HW_DIP_RANGE, **(dip_range or {})}
+    lo = jnp.array([dr[0][0], dr[1][0], dr[2][0]])[fault_type]
+    hi = jnp.array([dr[0][1], dr[1][1], dr[2][1]])[fault_type]
+    return lo + (hi - lo) * random.uniform(key, fault_type.shape)
+
+
+def _sample_width(key, M, fault_type, Dip, Ztor, zseis=20.0):
+    """W&C94 width with lognormal scatter; optionally capped so that
+    Ztor + W*sin(Dip) <= zseis (km). zseis=None disables the cap."""
+    a = jnp.array([WC94_WIDTH[i][0] for i in range(3)])[fault_type]
+    b = jnp.array([WC94_WIDTH[i][1] for i in range(3)])[fault_type]
+    sig = jnp.array([WC94_WIDTH[i][2] for i in range(3)])[fault_type]
+    W = 10.0 ** (a + b * M + sig * random.normal(key, M.shape))
+    if zseis is not None:
+        W_max = jnp.maximum((zseis - Ztor) / jnp.sin(jnp.deg2rad(Dip)), 1.0)
+        W = jnp.minimum(W, W_max)
+    return W
+
+
+def sample_scenarios_hw(
+    site_values: Dict[str, Any],
+    F: np.ndarray,
+    nl_model_dict: Optional[dict],
+    n_sample: int = 100_000,
+    seed: int = 1702,
+    dataset_region: str = "wus",
+    func_gs_scaling: str = "stafford",
+    const: Optional[ModelConstants] = None,
+    bounds: Optional[Dict[str, tuple]] = None,
+    fault_type_probs=(0.2, 0.5, 0.3),     # [strike-slip, reverse, normal]
+    dip_range: Optional[Dict[int, tuple]] = None,
+    ztor_sigma: float = 2.0,              # km, sd of the truncated normal
+    ztor_max: float = 12.0,               # km; HW Ztor taper is zero at 10
+    zseis: Optional[float] = 20.0,        # km; None = no seismogenic-depth cap on W
+    rx_window: tuple = (-0.2, 1.2),       # Rx / R2 range for the focused samples
+    broad_frac: float = 0.1,              # share of samples with broad Rx/Ry0
+    rx_broad: tuple = (-50.0, 150.0),     # km
+    ry_broad_max: float = 100.0,          # km
+    p_ry0_zero: float = 0.5,              # P(Ry0 = 0) for focused samples
+    fixed: Optional[Dict[str, Any]] = None,
+    amp1d_dataset=None,
+    amp1d_target_name: str = "amp_predicted",
+):
+    """
+    Alternative to `sample_scenarios` for hanging-wall-affected scenarios.
+
+    Samples source geometry (M, mechanism, Dip, Ztor, W) and site position
+    (Rx, Ry0), then derives Rrup from the geometry, so Rrup is returned in
+    column "R" (consistent with Rx). Vs30, vsmeas, basin and region are
+    sampled as in `sample_scenarios`. Returns (df_scenarios, ln_median).
+
+    `fixed` holds scalar columns constant instead of sampling them (e.g.
+    {"basin_id": 0, "vsmeas_id": 0}); meant for VS and the categoricals.
+    Rrup is NOT recomputed, so fixing a geometry column (Rx, Ry0, Dip, FW, Z)
+    makes R inconsistent with it.
+    """
+    const = const if const is not None else ModelConstants()
+    bounds_ = {**HW_SAMPLE_BOUNDS, **(bounds or {})}
+
+    if dataset_region == "global":
+        n_region, n_basin = 1, 1
+    else:
+        n_region = jnp.asarray(site_values["c_region"]).shape[0]
+        n_basin = jnp.asarray(site_values["c_basin"]).shape[0]
+    n_vsmeas = 2
+
+    keys = random.split(random.key(seed), 15)
+    (k_m, k_vs, k_ft, k_dip, k_z, k_w, k_rx, k_rxb, k_isb, k_ry, k_ry0,
+     k_reg, k_bas, k_vsm, _) = keys
+    shape = (n_sample,)
+
+    M = random.uniform(k_m, shape, minval=bounds_["M"][0], maxval=bounds_["M"][1])
+    VS = random.uniform(k_vs, shape, minval=bounds_["VS"][0], maxval=bounds_["VS"][1])
+
+    fault_type = random.categorical(k_ft, jnp.log(jnp.asarray(fault_type_probs)), shape=shape)
+    Frev = jnp.where(fault_type == 1, 1.0, 0.0)
+    Fnm = jnp.where(fault_type == 2, 1.0, 0.0)
+
+    Dip = _sample_dip(k_dip, fault_type, dip_range)
+
+    mu_z = ztor_mean_cy14(M, Frev)
+    Ztor = mu_z + ztor_sigma * random.truncated_normal(
+        k_z, (0.0 - mu_z) / ztor_sigma, (ztor_max - mu_z) / ztor_sigma, shape)
+
+    W = _sample_width(k_w, M, fault_type, Dip, Ztor, zseis)
+
+    # Site position: focused on the taper region (0, R2), plus a broad subset
+    R2 = 3.0 * W * jnp.cos(jnp.deg2rad(Dip))
+    u = random.uniform(k_rx, shape)
+    rx_focus = R2 * (rx_window[0] + (rx_window[1] - rx_window[0]) * u)
+    rx_wide = random.uniform(k_rxb, shape, minval=rx_broad[0], maxval=rx_broad[1])
+    is_broad = random.uniform(k_isb, shape) < broad_frac
+    Rx = jnp.where(is_broad, rx_wide, rx_focus)
+
+    ry_window = 1.5 * (jnp.maximum(Rx, 0.0) * jnp.tan(jnp.deg2rad(20.0)) + 5.0)
+    ry_max = jnp.where(is_broad, ry_broad_max, ry_window)
+    Ry0 = ry_max * random.uniform(k_ry, shape)
+    Ry0 = jnp.where((random.uniform(k_ry0, shape) < p_ry0_zero) & ~is_broad, 0.0, Ry0)
+
+    Rrup = rupture_distance(Rx, Ry0, Ztor, Dip, W)
+
+    subregion_id = random.categorical(k_reg, jnp.ones(n_region), shape=shape)
+    basin_id = random.categorical(k_bas, jnp.ones(n_basin), shape=shape)
+    vsmeas_id = random.categorical(k_vsm, jnp.ones(n_vsmeas), shape=shape)
+
+    df_scenarios = pd.DataFrame({
+        "M": np.asarray(M), "R": np.asarray(Rrup), "Z": np.asarray(Ztor),
+        "VS": np.asarray(VS), "Frev": np.asarray(Frev), "Fnm": np.asarray(Fnm),
+        "Rx": np.asarray(Rx), "Ry0": np.asarray(Ry0),
+        "Dip": np.asarray(Dip), "FW": np.asarray(W),
+        "subregion_id": np.asarray(subregion_id),
+        "basin_id": np.asarray(basin_id),
+        "vsmeas_id": np.asarray(vsmeas_id),
+    })
+    for col, value in (fixed or {}).items():
+        df_scenarios[col] = value
+    for col, default in DEFAULTS.items():
+        if col not in df_scenarios.columns:
+            df_scenarios[col] = default
+
+    ln_median = _predict_from_dataframe(
+        df_scenarios, site_values, F, nl_model_dict,
+        dataset_region, func_gs_scaling, const,
+        amp1d_dataset=amp1d_dataset, amp1d_target_name=amp1d_target_name,
+    )
+    return df_scenarios, ln_median
+
+
+def harmonize_footwall_geometry(
+    df_scenarios: pd.DataFrame,
+    seed: int = 0,
+    resample_dip_width: bool = False,
+    dip_range: Optional[Dict[int, tuple]] = None,
+    zseis: Optional[float] = 20.0,
+) -> pd.DataFrame:
+    """
+    Post-process output of the footwall `sample_scenarios` so it can be
+    stacked with `sample_scenarios_hw`.
+
+    Rx is set to the footwall site perpendicular to the trace that is
+    consistent with the sampled Rrup and Ztor: Rx = -sqrt(max(R^2 - Z^2, 0)),
+    Ry0 = 0 (Rrup >= |Rx| whenever Ztor > 0, so -Rrup itself would be
+    slightly inconsistent). If `resample_dip_width`, Dip and FW are drawn
+    from the same conditional distributions as in the HW sampler instead of
+    the fixed 90 deg / 60 km.
+
+    Because the HW term is exactly zero for Rx <= 0, the footwall ln_median
+    does not change -- *provided Dip and FW only enter through the HW term*
+    (check this once against median_core).
+    """
+    df = df_scenarios.copy()
+    R, Z = df["R"].to_numpy(), df["Z"].to_numpy()
+    df["Rx"] = -np.sqrt(np.clip(R**2 - Z**2, 0.0, None))
+    df["Ry0"] = 0.0
+    if resample_dip_width:
+        fault_type = jnp.asarray(np.where(df["Frev"] == 1, 1, np.where(df["Fnm"] == 1, 2, 0)))
+        k_dip, k_w = random.split(random.key(seed))
+        Dip = _sample_dip(k_dip, fault_type, dip_range)
+        W = _sample_width(k_w, jnp.asarray(df["M"].to_numpy()), fault_type, Dip,
+                          jnp.asarray(Z), zseis)
+        df["Dip"], df["FW"] = np.asarray(Dip), np.asarray(W)
+    return df
