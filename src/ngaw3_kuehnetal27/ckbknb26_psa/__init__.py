@@ -7,7 +7,6 @@ from .median_core import (
 from .nonlinear_site import (
     Ilhan26Coefficients,
     load_ilhan26_coefficients,
-    compute_ilhan26_ir,
     compute_ln_nonlinearity_ilhan26,
 )
 from .scenario_prediction import (
@@ -23,7 +22,6 @@ __all__ = [
     "calculate_median_psa_campbelletal27",
     "Ilhan26Coefficients",
     "load_ilhan26_coefficients",
-    "compute_ilhan26_ir",
     "compute_ln_nonlinearity_ilhan26",
     "DEFAULTS",
     "scenario_predict_campbelletal27",

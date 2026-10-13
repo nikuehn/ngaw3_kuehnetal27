@@ -11,22 +11,15 @@ function are not ported.
 
 **Nonlinear soil amplification** is implemented for the Ilhan et al.
 (2026) model (`nonlinear_site.py`, ported from `ILHAN26.R`) -- pass
-`nl_coef`/`coef_pga` to `calculate_ln_median_psa_campbelletal27` to enable
-it (see that function's docstring). With `nl_coef=None` (the default) the
+`nl_coef` to `calculate_ln_median_psa_campbelletal27` to enable it (see
+that function's docstring). With `nl_coef=None` (the default) the
 site term is linear-only (`fsite = flin`), i.e. what the R code computes
 when `NlnMod == FALSE`.
 
-Two simplifications relative to the R code, both noted at the point they
-apply below:
+One simplification relative to the R code, noted at the point it applies
+below:
 
-1. **PGA row.** The R code always treats `Coeffs[1, ]` (period 0.01 s) as
-   a separate "PGA" coefficient set for the nonlinear model, independent
-   of whatever period subset is being predicted. Here that's the
-   `coef_pga` argument -- load it explicitly with
-   `load_coefficients(csv_path, periods=[0.01])` rather than relying on
-   0.01 s being present in `coef`.
-
-2. **Rx/Rjb back-fill.** The R code back-fills missing `Rx`/`Rjb` inside
+**Rx/Rjb back-fill.** The R code back-fills missing `Rx`/`Rjb` inside
    a single vectorized `ifelse(is.na(Rx) | is.na(Rjb), <block>, NA)`,
    which (because `ifelse`'s true/false branches are each evaluated as
    whole vectors) would zero out valid `Rx`/`Rjb` entries elsewhere in
@@ -61,7 +54,7 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 
-from .nonlinear_site import Ilhan26Coefficients, compute_ilhan26_ir, compute_ln_nonlinearity_ilhan26
+from .nonlinear_site import IR_CAP, Ilhan26Coefficients, compute_ln_nonlinearity_ilhan26
 
 __all__ = [
     "Coefficients",
@@ -165,9 +158,7 @@ def load_coefficients(csv_path: str, periods: Optional[Sequence[float]] = None) 
     periods : sequence of float, optional
         Restrict to these periods (matched to `Per` values in the file
         with a small floating-point tolerance -- see `_select_periods`).
-        Defaults to every period in the file, in file order. Pass e.g.
-        `periods=[0.01]` to get a single-period `Coefficients` for use as
-        `coef_pga`.
+        Defaults to every period in the file, in file order.
     """
     df = pd.read_csv(csv_path)
     if periods is not None:
@@ -206,7 +197,7 @@ def _fill_geometry(M, Rrup, Frv, Dip, W, Ztor, Zhyp, Zbot, HW, Rjb, Rx):
     zhyp_default = Ztor + jnp.exp(jnp.minimum(f_dZM + f_dZDip, jnp.log(0.9 * (Zbor - Ztor))))
     Zhyp = jnp.where(jnp.isnan(Zhyp), zhyp_default, Zhyp)
 
-    # Rx / Rjb -- see module docstring note 2 on the departure from the R
+    # Rx / Rjb -- see module docstring on the departure from the R
     # code's whole-vector ifelse.
     L1 = Ztor / jnp.cos(Dip * deg2rad)
     L2 = Zbor / jnp.cos(Dip * deg2rad)
@@ -239,14 +230,12 @@ def _base_terms(c, M_, Rrup_, Rjb_, Rx_, Frv_, Fnm_, W_, Dip_, Ztor_, Zhyp_, HW_
     Sum of every median term that does *not* depend on Vs30/Z25 (constant,
     magnitude, distance, attenuation, style-of-faulting, hypocentral-depth
     and hanging-wall terms) -- shared between the site-level prediction
-    (using `coef`) and any rock-reference prediction needed for the
-    nonlinear model (using `coef` or `coef_pga`, both with Vs30 fixed to
-    the reference 800 m/s implicitly via the sediment term, see
+    and the rock-reference prediction needed for the nonlinear model (the
+    latter differs only in its sediment term, see
     `_site_and_rock_sediment_terms`).
 
     All `*_` arguments are already-broadcast (n, 1) column vectors; `c` is
-    a `Coefficients` (or single-period subset of one), giving (n,
-    n_periods_of_c) output.
+    a `Coefficients`, giving (n, n_periods) output.
     """
     deg2rad = jnp.pi / 180.0
 
@@ -294,9 +283,8 @@ def _site_and_rock_sediment_terms(c, Vs30_, Z25_):
     """
     Centered basin-depth (sediment) term, both at the site's own Vs30
     (`fsed`, R: `fsed.T`) and relative to the rock reference `v0`
-    (`fsed_rock`, R: `fsed.Ir`/`fsed.PGAr`) -- the latter only used when
-    building a rock-reference (PSAr/PGAr) prediction for the nonlinear
-    model. Both reuse the same site Z25 (`Z25_filled`); only the
+    (`fsed_rock`, R: `fsed.Ir`) -- the latter only used when building the
+    rock-reference PSAr prediction for the nonlinear model. Both reuse the same site Z25 (`Z25_filled`); only the
     reference `Z25` they're centered on differs.
     """
     lnZ25ref = jnp.where(
@@ -337,7 +325,6 @@ def calculate_ln_median_psa_campbelletal27(
     Z25=jnp.nan,
     HW=0.0,
     nl_coef: Optional[Ilhan26Coefficients] = None,
-    coef_pga: Optional[Coefficients] = None,
 ) -> jnp.ndarray:
     """
     ln(median PSA) for every (scenario, period) combination.
@@ -373,26 +360,13 @@ def calculate_ln_median_psa_campbelletal27(
         From `nonlinear_site.load_ilhan26_coefficients`, loaded with the
         **same** `periods` as `coef` (so the two line up period-for-
         period). If given, the Ilhan et al. (2026) nonlinear
-        soil-amplification term is added to the site term; `coef_pga` is
-        then required too. If omitted (default), the site term is
-        linear-only.
-    coef_pga : Coefficients, optional
-        Single-period (0.01 s / PGA) `Coefficients`, e.g.
-        `load_coefficients(csv_path, periods=[0.01])`. Required, and only
-        used, when `nl_coef` is given -- see module docstring note 1 on
-        why PGA needs its own coefficient set rather than reusing `coef`.
+        soil-amplification term is added to the site term. If omitted
+        (default), the site term is linear-only.
 
     Returns
     -------
     jnp.ndarray, shape (n, n_periods)
     """
-    if (nl_coef is None) != (coef_pga is None):
-        raise ValueError(
-            "nl_coef and coef_pga must be given together (both None for a "
-            "linear-only site term, or both set to enable the Ilhan26 "
-            "nonlinear model)."
-        )
-
     (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
      Vs30, Vs30_meas, Z25, HW) = jnp.broadcast_arrays(*[
         jnp.atleast_1d(jnp.asarray(x, dtype=jnp.float64)) for x in
@@ -427,16 +401,9 @@ def calculate_ln_median_psa_campbelletal27(
         )
 
     # Rock-reference (Vs30 = 800 m/s) median PSA, needed to drive the
-    # nonlinear model (R: PSAr.T).
+    # nonlinear model (R: PSAr.T), capped at IR_CAP (1 g) per Ilhan et al. (2026).
     PSAr = jnp.exp(f_base + fsed_rock)
-
-    # Rock-reference median PGA from its own (period = 0.01 s) coefficient
-    # set (R: PGAr, via Coeffs.PGA = Coeffs[1, ]) -- see module docstring note 1.
-    f_base_pga = _base_terms(coef_pga, M_, Rrup_, Rjb_, Rx_, Frv_, Fnm_, W_, Dip_, Ztor_, Zhyp_, HW_)
-    _, fsed_rock_pga = _site_and_rock_sediment_terms(coef_pga, Vs30_, Z25_)
-    PGAr = jnp.exp(f_base_pga + fsed_rock_pga)  # shape (n, 1)
-
-    ir = compute_ilhan26_ir(PSAr, PGAr)
+    ir = jnp.minimum(PSAr, IR_CAP)
     fnln = compute_ln_nonlinearity_ilhan26(Vs30_, ir, nl_coef)
 
     return f_base + flin + fnln + fsed

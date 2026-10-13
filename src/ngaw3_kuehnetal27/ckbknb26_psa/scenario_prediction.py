@@ -24,7 +24,7 @@ _COEF_MEAN_PATH = os.path.join(_DATA_DIR, "CoefMean.csv")
 _ILHAN26_COEFFS_PATH = os.path.join(_DATA_DIR, "ILHAN26_Coeffs.csv")
 
 # Defaults for every scenario variable. NaN marks the geometry fields that
-# `calculate_ln_median_psa` back-fills itself (see median_core.py) --
+# `calculate_ln_median_psa_campbelletal27` back-fills itself (see median_core.py) --
 # matching the R model's `NA` convention.
 DEFAULTS: Dict[str, Any] = {
     "M": 6.5,
@@ -49,7 +49,6 @@ def scenario_predict_campbelletal27(
     coef: Coefficients,
     output: str = "ln_median",
     nl_coef: Optional[Ilhan26Coefficients] = None,
-    coef_pga: Optional[Coefficients] = None,
     **kwargs,
 ):
     """
@@ -65,10 +64,10 @@ def scenario_predict_campbelletal27(
         Whether to return ln(median PSA) (matches
         `calculate_ln_median_psa_campbelletal27`, and is what you want
         for e.g. residual/likelihood work) or median PSA in g.
-    nl_coef, coef_pga : optional
-        Enable the Ilhan et al. (2026) nonlinear site term -- passed
+    nl_coef : Ilhan26Coefficients, optional
+        Enables the Ilhan et al. (2026) nonlinear site term -- passed
         straight through to `calculate_ln_median_psa_campbelletal27`; see
-        its docstring. Both or neither.
+        its docstring.
     **kwargs
         Arrays (or scalars) for any subset of the scenario variables in
         `DEFAULTS` (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
@@ -122,7 +121,6 @@ def scenario_predict_campbelletal27(
         Z25=jnp.asarray(df_scenarios["Z25"].values),
         HW=jnp.asarray(df_scenarios["HW"].values),
         nl_coef=nl_coef,
-        coef_pga=coef_pga,
     )
     values = ln_median if output == "ln_median" else jnp.exp(ln_median)
     col_prefix = "lnT" if output == "ln_median" else "T"
@@ -143,16 +141,13 @@ def scenario_predict_campbelletal27_reference(**kwargs):
     `Ilhan26Coefficients` objects to load or pass in beforehand -- and
     always predicts the full spectrum (every period present in
     `CoefMean.csv`, in file order), with the Ilhan et al. (2026)
-    nonlinear site term included. PGA, needed internally to drive the
-    nonlinear model, is taken from `CoefMean.csv`'s first row (period
-    0.01 s), matching the R model's `Coeffs.PGA = Coeffs[1, ]`.
+    nonlinear site term included.
 
     Use this when you just want "the model's predictions" without
     thinking about coefficient files; use `scenario_predict_campbelletal27`
     directly (with coefficients loaded once and reused) when predicting
     many batches, or a restricted set of periods, since this function
-    re-reads and re-interpolates nothing -- it reloads the coefficient
-    CSVs from disk on every call.
+    reloads the coefficient CSVs from disk on every call.
 
     Parameters
     ----------
@@ -180,13 +175,8 @@ def scenario_predict_campbelletal27_reference(**kwargs):
     """
     coef = load_coefficients(_COEF_MEAN_PATH)
     periods = np.asarray(coef.Per).tolist()
-
-    # First row of the coefficient file -- not necessarily literally 0.01
-    # if CoefMean.csv were ever swapped out, so read it off rather than
-    # hard-coding it, but it's period 0.01 s in the file shipped here.
-    coef_pga = load_coefficients(_COEF_MEAN_PATH, periods=[periods[0]])
     nl_coef = load_ilhan26_coefficients(_ILHAN26_COEFFS_PATH, periods=periods)
 
     return scenario_predict_campbelletal27(
-        coef, output="ln_median", nl_coef=nl_coef, coef_pga=coef_pga, **kwargs
+        coef, output="ln_median", nl_coef=nl_coef, **kwargs
     )

@@ -12,20 +12,17 @@ implemented for EAS/PSA in `nl_models.py`
 
 The one substantive difference -- why this isn't just a call into the
 existing function -- is how the reference intensity ("Ir") going into the
-nonlinearity term is determined. The existing EAS implementation caps a
-single reference motion at a fixed 0.3 g-sec (`IR_LIM`). Ilhan26 instead
-picks between two *different* rock-reference motions depending on their
-level (`ILHAN26.R`):
+nonlinearity term is determined. The existing EAS implementation caps the
+reference motion at a fixed 0.3 g-sec (`IR_LIM`). Ilhan26 instead caps the
+rock-reference PSA at 1 g (`IR_CAP`):
 
-    Ir = PSAr            if PSAr <= 1 g
-       = min(PGAr, 1 g)   otherwise
+    Ir = min(PSAr, 1 g)
 
-i.e. once the rock-reference PSA at a given period exceeds 1 g, the model
-switches to using (capped) PGA as the nonlinearity driver instead. This
-needs both `PSAr` and `PGAr` as separate median predictions, not just one
-capped reference array -- see `compute_ilhan26_ir` and how
-`median_core.calculate_ln_median_psa_campbelletal27` computes both before
-calling `compute_ln_nonlinearity_ilhan26`.
+(An earlier version of the model replaced PSAr by PGAr once PSAr exceeded
+1 g; the model developers have since changed this to a plain 1 g cap,
+which also means no separate rock-reference PGA prediction is needed.)
+`median_core.calculate_ln_median_psa_campbelletal27` applies the cap
+before calling `compute_ln_nonlinearity_ilhan26`.
 
 Median only: the standard-deviation half of `ILHAN26.R` (`sig_c`, `sig_f`,
 `V1`, `V2`, and the `Alpha` derivative used to propagate nonlinearity into
@@ -43,14 +40,13 @@ import pandas as pd
 __all__ = [
     "Ilhan26Coefficients",
     "load_ilhan26_coefficients",
-    "compute_ilhan26_ir",
     "compute_ln_nonlinearity_ilhan26",
 ]
 
 V_REF = 800.0             # Reference (rock) Vs30, m/s -- matches v0 in the median-model coefficients
 V_REF2 = 360.0            # Second reference velocity, m/s
 FREQ_TAPER_CENTER = 4.998  # Hz, center of cosine taper for the frequency weight
-IR_CAP = 1.0              # g -- Ilhan26's cap on the PSA/PGA reference motion
+IR_CAP = 1.0              # g -- Ilhan26's cap on the rock-reference PSA
 
 _ILHAN26_FIELDS = ["Per", "f3", "f4", "f5", "Vf", "Vg"]
 
@@ -117,25 +113,6 @@ def load_ilhan26_coefficients(
     })
 
 
-def compute_ilhan26_ir(psar: jnp.ndarray, pgar: jnp.ndarray) -> jnp.ndarray:
-    """
-    Ilhan26's reference-motion rule (`ILHAN26.R`:
-    ``Ir = ifelse(PSAr <= 1, PSAr, min(PGAr, 1))``).
-
-    Parameters
-    ----------
-    psar : jnp.ndarray, shape (n, n_periods)
-        Rock-reference (Vs30 = 800 m/s) median PSA, in g.
-    pgar : jnp.ndarray, shape (n, 1)
-        Rock-reference median PGA, in g.
-
-    Returns
-    -------
-    jnp.ndarray, shape (n, n_periods)
-    """
-    return jnp.where(psar <= IR_CAP, psar, jnp.minimum(pgar, IR_CAP))
-
-
 def compute_ln_nonlinearity_ilhan26(
     vs30: jnp.ndarray, ir: jnp.ndarray, nl_coef: Ilhan26Coefficients
 ) -> jnp.ndarray:
@@ -152,7 +129,8 @@ def compute_ln_nonlinearity_ilhan26(
     vs30 : jnp.ndarray, shape (n, 1)
         Site Vs30 (m/s), as a column vector.
     ir : jnp.ndarray, shape (n, n_periods)
-        Reference intensity (g) -- from `compute_ilhan26_ir`.
+        Reference intensity (g): the rock-reference PSA, already capped at
+        `IR_CAP` by the caller (``jnp.minimum(PSAr, IR_CAP)``).
     nl_coef : Ilhan26Coefficients, fields shape (n_periods,)
         Must cover the same periods, in the same order, as the median
         model's own `Coefficients` (both loaded with the same `periods`
