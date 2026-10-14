@@ -775,3 +775,116 @@ def harmonize_footwall_geometry(
                           jnp.asarray(Z), zseis)
         df["Dip"], df["FW"] = np.asarray(Dip), np.asarray(W)
     return df
+
+"""
+Diagnostic: reference model vs NN along an Rx sweep (hanging-wall check).
+
+Paste below the `hw_sampling.py` additions in scenario_prediction.py; uses
+ztor_mean_cy14, rupture_distance, WC94_WIDTH and DEFAULTS from there.
+"""
+
+
+def hw_sweep_dataframe(
+    M: float,
+    rx,
+    fault_type: int = 1,      # 0 = strike-slip, 1 = reverse, 2 = normal
+    dip: float = 45.0,
+    W: Optional[float] = None,       # km; default: W&C94 median for (M, fault_type)
+    Ztor: Optional[float] = None,    # km; default: CY14 mean for (M, fault_type)
+    Ry0: float = 0.0,
+    VS: float = 400.0,
+    basin_id: int = 0,
+    vsmeas_id: int = 0,
+    subregion_id: int = 0,
+) -> pd.DataFrame:
+    """One scenario, Rx swept over `rx` (km). Rrup is derived from the
+    geometry for every Rx, so the sweep is internally consistent."""
+    rx = np.asarray(rx, dtype=float)
+    Frev, Fnm = float(fault_type == 1), float(fault_type == 2)
+    if W is None:
+        a, b, _ = WC94_WIDTH[fault_type]
+        W = 10.0 ** (a + b * M)
+    if Ztor is None:
+        Ztor = float(ztor_mean_cy14(jnp.asarray(M), jnp.asarray(Frev)))
+    n = len(rx)
+    df = pd.DataFrame({
+        "M": M, "Rx": rx, "Ry0": Ry0, "Dip": dip, "FW": W, "Z": Ztor,
+        "VS": VS, "Frev": Frev, "Fnm": Fnm, "basin_id": basin_id,
+        "vsmeas_id": vsmeas_id, "subregion_id": subregion_id,
+    }, index=range(n))
+    df["R"] = np.asarray(rupture_distance(
+        jnp.asarray(rx), Ry0, Ztor, dip, W))
+    for col, default in DEFAULTS.items():
+        if col not in df.columns:
+            df[col] = default
+    return df
+
+
+def plot_hw_sweep(
+    predict_ref: Callable[[pd.DataFrame], np.ndarray],
+    predict_nn: Callable[[pd.DataFrame], np.ndarray],
+    freqs,
+    magnitudes=(6.0, 7.0),
+    plot_freqs=(0.5, 2.0, 10.0),
+    rx_range=(-50.0, 50.0),
+    n_points=401,
+    show_no_hw=True,
+    **scenario_kwargs,        # fault_type, dip, W, Ztor, Ry0, VS, ... see hw_sweep_dataframe
+):
+    """
+    Reference model vs NN for ln(EAS) along an Rx sweep, one block per
+    magnitude (curves on top, NN - reference below) and one column per
+    frequency (nearest entry of `freqs` to each of `plot_freqs`).
+
+    predict_ref(df) -> (N, n_freq) ln values, e.g.
+        lambda d: np.asarray(_predict_from_dataframe(d, site_values, F,
+                  nl_model_dict, dataset_region, func_gs_scaling, const))
+    predict_nn(df)  -> (N, n_freq), e.g. lambda d: predict(model, scaler, d)
+
+    show_no_hw adds the reference with the HW term switched off (same R, Rx
+    mirrored to the footwall) so the NN error can be judged against the size
+    of the HW effect. Returns the matplotlib Figure.
+    """
+    import matplotlib.pyplot as plt
+
+    freqs = np.asarray(freqs)
+    idx = [int(np.argmin(np.abs(np.log(freqs / f)))) for f in plot_freqs]
+    rx = np.linspace(rx_range[0], rx_range[1], n_points)
+
+    fig, axes = plt.subplots(
+        2 * len(magnitudes), len(idx), sharex=True, squeeze=False,
+        figsize=(4.2 * len(idx), 3.6 * len(magnitudes)),
+        gridspec_kw={"height_ratios": [3, 1] * len(magnitudes)},
+    )
+    for i, M in enumerate(magnitudes):
+        df = hw_sweep_dataframe(M, rx, **scenario_kwargs)
+        ref = np.asarray(predict_ref(df))
+        nnp = np.asarray(predict_nn(df))
+        if show_no_hw:
+            df0 = df.copy()
+            df0["Rx"] = -np.abs(df0["Rx"]) - 1.0     # footwall: HW term off, R unchanged
+            ref0 = np.asarray(predict_ref(df0))
+        info = (f"dip {df.Dip[0]:.0f}°, W {df.FW[0]:.1f} km, Ztor {df.Z[0]:.1f} km, "
+                f"R2 = {3 * df.FW[0] * np.cos(np.deg2rad(df.Dip[0])):.0f} km")
+        for j, k in enumerate(idx):
+            ax, axd = axes[2 * i, j], axes[2 * i + 1, j]
+            if show_no_hw:
+                ax.plot(rx, ref0[:, k], color="0.7", lw=1.2, label="reference, no HW term")
+            ax.plot(rx, ref[:, k], color="C0", lw=2, label="reference model")
+            ax.plot(rx, nnp[:, k], color="C3", lw=1.5, ls="--", label="NN")
+            axd.plot(rx, nnp[:, k] - ref[:, k], color="C3", lw=1.2)
+            axd.axhline(0, color="k", lw=0.5)
+            for a in (ax, axd):
+                a.axvline(0, color="k", lw=0.5, ls=":")
+            ax.set_title(f"M {M:g}, f = {freqs[k]:.3g} Hz\n{info}", fontsize=8)
+            if j == 0:
+                ax.set_ylabel("ln EAS")
+                axd.set_ylabel("NN − ref")
+            if i == len(magnitudes) - 1:
+                axd.set_xlabel("Rx (km)")
+            print(f"M {M:g}, f {freqs[k]:.3g} Hz: max |NN - ref| = "
+                  f"{np.abs(nnp[:, k] - ref[:, k]).max():.3f} ln units"
+                  + (f" (HW effect up to {np.abs(ref[:, k] - ref0[:, k]).max():.3f})" if show_no_hw else ""))
+    axes[0, 0].legend(fontsize=7)
+    fig.tight_layout()
+    return fig
