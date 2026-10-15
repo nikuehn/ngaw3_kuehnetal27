@@ -159,10 +159,11 @@ def coefficients_from_site_values(
     )
 
 
-def compute_deltaWS(
+def compute_median_or_deltaWS(
     data_dict: Dict[str, Any],
     site_values: Dict[str, Any],
     dataset_region: str = "wus",
+    return_median = True,
     const: Optional[ModelConstants] = None,
 ):
     """
@@ -291,8 +292,11 @@ def compute_deltaWS(
         amp1d_dict=data_dict.get("amp1d_dict") if dataset_region == "wus" else None,
     )
 
-    Y = jnp.asarray(Y)
-    return jnp.where(jnp.isnan(Y), jnp.nan, Y - median)
+    if return_median:
+        return median
+    else:
+        Y = jnp.asarray(Y)
+        return jnp.where(jnp.isnan(Y), jnp.nan, Y - median)
 
 def _predict_from_dataframe(
     df_scenarios: pd.DataFrame,
