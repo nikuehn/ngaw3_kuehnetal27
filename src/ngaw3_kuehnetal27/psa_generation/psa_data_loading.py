@@ -141,10 +141,44 @@ def load_psa_data(
     return out, periods_used, names_periods_used
 
 
+_HW_SOURCE_COLUMNS = {"dip": "Dip", "fault_width": "FW", "rx": "Rx", "ry0": "Ry0"}
+
+
+def _check_hw_columns(data_used: pd.DataFrame) -> None:
+    """
+    Raise if the hanging-wall geometry columns of the flatfile cannot be used
+    as NN inputs. Rows are never dropped here, because `prepare_nn_inputs`
+    promises to keep the row order of `data_used` (and hence of the EAS/PSA
+    tables); remove or fix the offending records upstream instead.
+    Missing values are NaN or the flatfile's -999 sentinel.
+    """
+    problems = {}
+    for col in _HW_SOURCE_COLUMNS:
+        if col not in data_used.columns:
+            raise KeyError(f"include_hw=True needs column '{col}' in data_used.")
+        v = data_used[col].to_numpy(dtype=float)
+        bad = ~np.isfinite(v) | (v <= -998)
+        if col == "fault_width":
+            bad |= v <= 0
+        elif col == "ry0":
+            bad |= v < 0
+        elif col == "dip":
+            bad |= (v <= 0) | (v > 90)
+        if bad.any():
+            problems[col] = int(bad.sum())
+    if problems:
+        raise ValueError(
+            "include_hw=True but some records have missing/invalid hanging-wall "
+            f"geometry (number of rows per column: {problems}). Filter or fill "
+            "these records before building the NN inputs."
+        )
+
+
 def prepare_nn_inputs(
     data_used: pd.DataFrame,
     depth_col: str = "ztor",
     include_region: bool = False,
+    include_hw: bool = False,
 ) -> pd.DataFrame:
     """
     Build the predictor DataFrame expected by `nn_psa_model.predict`
@@ -158,6 +192,8 @@ def prepare_nn_inputs(
     regional -> subregion_id (only if `include_region`),
     vsmeas_id <- 1 if vs30_code_id not in [0, 1, 2] else 0 (same rule as
     `vs30_measured` in `prepare_data`).
+    If `include_hw`: dip -> Dip, fault_width -> FW, rx -> Rx, ry0 -> Ry0
+    (km and degrees, as in the flatfile).
 
     Parameters
     ----------
@@ -168,6 +204,9 @@ def prepare_nn_inputs(
         with that instead).
     include_region : bool
         Add `subregion_id`. Must match `model.include_region`.
+    include_hw : bool
+        Add Dip, FW, Rx, Ry0. Must match `model.include_hw`. Raises if any of
+        these is missing/invalid for some record (see `_check_hw_columns`).
     """
     df = pd.DataFrame({
         "M": data_used["magnitude"].to_numpy(),
@@ -181,4 +220,8 @@ def prepare_nn_inputs(
     })
     if include_region:
         df["subregion_id"] = data_used["regional"].to_numpy()
+    if include_hw:
+        _check_hw_columns(data_used)
+        for src, dst in _HW_SOURCE_COLUMNS.items():
+            df[dst] = data_used[src].to_numpy(dtype=float)
     return df
