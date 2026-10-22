@@ -12,10 +12,23 @@ Design notes
   of the computation. This means there is exactly one implementation of
   each model's math to keep correct.
 
+- Both models exist for two intensity measures, selected with
+  `target`: "EAS" (Fourier amplitude spectrum) and "PSA" (pseudo-spectral
+  acceleration). The math is identical; only the coefficient tables (and,
+  for hashash_new, IR_LIM) differ. The `eas_ref` arguments below hold the
+  reference-condition IMT of whichever target is used.
+- Model inputs are always *frequencies* in Hz, also for PSA. The Ilhan et
+  al. (2026) PSA tables are tabulated vs. period; they are converted to
+  frequency internally, so pass 1/T for PSA.
+
 Usage
 -----
     frequencies = jnp.array([0.5, 1.0, 2.0, 5.0, 10.0])
     interp_param, interp_nonlin = setup_mahdi_coefficients(frequencies)
+
+    # PSA at T = 0.1, 0.2, 1.0 s -> pass frequencies = 1/T
+    freqs_psa = 1.0 / jnp.array([0.1, 0.2, 1.0])
+    interp_param, interp_nonlin = setup_mahdi_coefficients(freqs_psa, target="PSA")
 
     # Inside numpyro model, vs30/magnitude vary per record:
     ln_amp = compute_ln_amplification_mahdi(
@@ -29,6 +42,7 @@ Usage
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Dict, Tuple
 
 import jax.numpy as jnp
@@ -37,6 +51,7 @@ from jax import vmap
 from ngaw3_kuehnetal27.site_amplification.coefficients import (
     interpolate_coeffs,
     load_coefficients,
+    period_table_to_frequency,
 )
 from ngaw3_kuehnetal27.utils import package_data_path
 
@@ -75,6 +90,21 @@ def batch_over_records(single_fn: Callable, in_axes: Tuple) -> Callable:
     return vmap(single_fn, in_axes=in_axes, out_axes=0)
 
 
+def _check_target(target: str) -> str:
+    """Normalize and validate the intensity-measure target."""
+    t = str(target).upper()
+    if t not in ("EAS", "PSA"):
+        raise ValueError(f"Unknown target: {target!r}. Expected 'EAS' or 'PSA'.")
+    return t
+
+
+def _data_file(filename: str, data_dir=None) -> Path:
+    """Resolve a coefficient file in `data_dir` or the package data dir."""
+    if data_dir is not None:
+        return Path(data_dir) / filename
+    return Path(package_data_path(filename))
+
+
 # ---------------------------------------------------------------------------
 # Mahdi model
 # ---------------------------------------------------------------------------
@@ -95,6 +125,15 @@ MAHDI_NONLIN_COLUMNS = {
     )
 }
 
+# (parameter file, nonlinearity file) per target. Both tables are
+# tabulated vs. frequency (Hz), column "freq", for EAS and PSA.
+MAHDI_FILES = {
+    "EAS": ("regression_parameters_trilinear_eas_all.csv",
+            "nn_parametric_coefficients_eas_all.csv"),
+    "PSA": ("regression_parameters_trilinear_psa_all.csv",
+            "nn_parametric_coefficients_psa_all.csv"),
+}
+
 REFERENCE_VS30 = 800.0  # m/s
 VS30_HINGE_LOW = 600.0  # m/s
 VS30_HINGE_HIGH = 1000.0  # m/s
@@ -102,6 +141,7 @@ VS30_HINGE_HIGH = 1000.0  # m/s
 
 def setup_mahdi_coefficients(
     frequencies: Array,
+    target: str = "EAS",
     data_dir=None,
 ) -> Tuple[Dict[str, Array], Dict[str, Array]]:
     """
@@ -112,7 +152,9 @@ def setup_mahdi_coefficients(
     Parameters
     ----------
     frequencies : Array
-        Target frequencies (Hz) for the GMM.
+        Target frequencies (Hz) for the GMM. For PSA pass 1/period.
+    target : {'EAS', 'PSA'}
+        Which coefficient tables to load.
     data_dir : str or Path, optional
         Directory containing the coefficient CSVs. Defaults to the
         package's bundled `data/` directory.
@@ -124,15 +166,11 @@ def setup_mahdi_coefficients(
     interp_nonlin : Dict[str, Array]
         Interpolated nonlinearity coefficients (a1_f2..a6_f2, a1_f4..a6_f4).
     """
-    param_path = (data_dir / "regression_parameters_trilinear_all.csv"
-                  if data_dir is not None
-                  else package_data_path("regression_parameters_trilinear_all.csv"))
-    nonlin_path = (data_dir / "nn_parametric_coefficients_all.csv"
-                   if data_dir is not None
-                   else package_data_path("nn_parametric_coefficients_all.csv"))
+    target = _check_target(target)
+    param_file, nonlin_file = MAHDI_FILES[target]
 
-    param_coeffs = load_coefficients(param_path)
-    nonlin_coeffs = load_coefficients(nonlin_path)
+    param_coeffs = load_coefficients(_data_file(param_file, data_dir))
+    nonlin_coeffs = load_coefficients(_data_file(nonlin_file, data_dir))
 
     interp_param = interpolate_coeffs(frequencies, param_coeffs, MAHDI_PARAM_COLUMNS)
     interp_nonlin = interpolate_coeffs(frequencies, nonlin_coeffs, MAHDI_NONLIN_COLUMNS)
@@ -326,11 +364,29 @@ Array, shape (n_records, n_freq)
 # ---------------------------------------------------------------------------
 
 HASHASH_NEW_COLUMNS = {name: name for name in ("f3", "f4", "f5", "Vf", "Vg")}
-HASHASH_NEW_SD_COLUMNS = {name: name for name in ("sigma_c", "V1", "V2", "sigma_f")}
+# Output key -> column in the Ilhan26 STDEV files. The sigma_c column is
+# headed with the Greek letter sigma (U+03C3) followed by "c".
+HASHASH_NEW_SD_COLUMNS = {
+    "sigma_c": "\u03c3c",
+    "V1": "V1",
+    "V2": "V2",
+    "sigma_f": "sigma_f",
+}
+
+# Ilhan et al. (2026): (parameter file, STDEV file, reference column) per
+# target. The PSA ("RS") tables are tabulated vs. period (s); the EAS
+# tables vs. frequency (Hz).
+HASHASH_NEW_FILES = {
+    "EAS": ("N2_EAS_Ilhan26.csv", "N2_EAS-STDEV_Ilhan26.csv", "Frequency"),
+    "PSA": ("N2_RS_Ilhan26.csv", "N2_RS-STDEV_Ilhan26.csv", "Period"),
+}
 
 V_REF_HASHASH = 800.0   # Reference Vs30, m/s
 V_REF2_HASHASH = 360.0  # Second reference velocity, m/s
-IR_LIM = 0.3            # g-sec
+# Upper limit of the reference IMT in the nonlinearity term, per target.
+# g-sec for EAS, g for PSA. Stored per-target in interp_param["ir_lim"].
+IR_LIM_HASHASH = {"EAS": 0.3, "PSA": 1.0}
+IR_LIM = IR_LIM_HASHASH["EAS"]  # legacy alias (EAS value); prefer IR_LIM_HASHASH
 FREQ_TAPER_CENTER = 4.998  # Hz, center of cosine taper for W_f
 
 
@@ -347,10 +403,12 @@ def setup_hashash_new_coefficients(
     Parameters
     ----------
     frequencies : Array
-        Target frequencies (Hz) for EAS, or periods (s) for PSA -- must
-        match the units of the `target` table's reference column.
+        Target frequencies (Hz), for both EAS and PSA. For PSA pass
+        1/period: the PSA tables are tabulated vs. period and are
+        converted to frequency internally.
     target : {'EAS', 'PSA'}
-        Which coefficient table to load.
+        Which coefficient table to load. Also selects IR_LIM
+        (0.3 for EAS, 1.0 for PSA).
     data_dir : str or Path, optional
         Directory containing the coefficient CSVs. Defaults to the
         package's bundled `data/` directory.
@@ -358,31 +416,30 @@ def setup_hashash_new_coefficients(
     Returns
     -------
     interp_param : Dict[str, Array]
-        Interpolated coefficients (f3, f4, f5, Vf, Vg), each shape (n_freq,).
+        Interpolated coefficients (f3, f4, f5, Vf, Vg), plus 'freq' (Hz)
+        and 'ir_lim' (target-dependent), each shape (n_freq,).
     interp_sd : Dict[str, Array]
         Interpolated standard-deviation coefficients (sigma_c, V1, V2,
         sigma_f), each shape (n_freq,).
     """
-    if target == "EAS":
-        param_file, sd_file, ref_col = "N2_EAS_ay26.csv", "N2_EAS_ay26-STDEV.csv", "Frequency"
-    elif target == "PSA":
-        param_file, sd_file, ref_col = "N2_RS_ay26.csv", "N2_RS_ay26-STDEV.csv", "Period"
+    target = _check_target(target)
+    param_file, sd_file, ref_col = HASHASH_NEW_FILES[target]
+
+    param_coeffs = load_coefficients(_data_file(param_file, data_dir))
+    sd_coeffs = load_coefficients(_data_file(sd_file, data_dir))
+
+    if ref_col == "Period":
+        # PSA tables are vs. period; convert to ascending frequency (Hz).
+        param_coeffs = period_table_to_frequency(param_coeffs, ref_col)
+        sd_coeffs = period_table_to_frequency(sd_coeffs, ref_col)
     else:
-        raise ValueError(f"Unknown target: {target!r}. Expected 'EAS' or 'PSA'.")
+        param_coeffs["freq"] = param_coeffs.pop(ref_col)
+        sd_coeffs["freq"] = sd_coeffs.pop(ref_col)
 
-    param_path = (data_dir / param_file if data_dir is not None
-                  else package_data_path(param_file))
-    sd_path = (data_dir / sd_file if data_dir is not None
-               else package_data_path(sd_file))
-
-    param_coeffs = load_coefficients(param_path)
-    param_coeffs["freq"] = param_coeffs.pop(ref_col)
-
-    sd_coeffs = load_coefficients(sd_path)
-    sd_coeffs["freq"] = sd_coeffs.pop(ref_col)
-
+    frequencies = jnp.asarray(frequencies)
     interp_param = interpolate_coeffs(frequencies, param_coeffs, HASHASH_NEW_COLUMNS)
     interp_param["freq"] = frequencies
+    interp_param["ir_lim"] = jnp.full_like(frequencies, IR_LIM_HASHASH[target])
     interp_sd = interpolate_coeffs(frequencies, sd_coeffs, HASHASH_NEW_SD_COLUMNS)
     interp_sd["freq"] = frequencies
 
@@ -397,18 +454,20 @@ def compute_ln_nonlinearity_hashash_new(
     """
     Compute the new-form Hashash nonlinearity term in log scale.
 
-    Based on N2_EAS_New_Model_Form_Coeffs_v2, including a transition term
-    TEM_NL and frequency-dependent weight W_f.
+    Model of Ilhan et al. (2026), including a transition term TEM_NL and
+    frequency-dependent weight W_f. Works for EAS and PSA; the target only
+    enters through the coefficient tables and `ir_lim`.
 
     Parameters
     ----------
     vs30 : float
         Vs30 in m/s (scalar).
     eas_ref : Array
-        Reference EAS at Vs30=800 m/s (linear scale, g-sec), shape (n_freq,).
+        Reference IMT (EAS in g-sec, or PSA in g) at Vs30=800 m/s, linear
+        scale, shape (n_freq,).
     interp_hashash : Dict[str, Array]
         Pre-interpolated coefficients with keys 'f3', 'f4', 'f5', 'Vf',
-        'Vg', 'freq', each shape (n_freq,).
+        'Vg', 'freq', 'ir_lim', each shape (n_freq,).
 
     Returns
     -------
@@ -423,7 +482,7 @@ def compute_ln_nonlinearity_hashash_new(
     freqs = interp_hashash["freq"]
 
     vs30_lim = jnp.clip(vs30, 200.0, V_REF_HASHASH)
-    ir_lim = jnp.minimum(eas_ref, IR_LIM)
+    ir_lim = jnp.minimum(eas_ref, interp_hashash["ir_lim"])
 
     tem_nl = jnp.clip(
         (V_REF_HASHASH - vs30_lim) / (V_REF_HASHASH - Vg), 0.0, 1.0
@@ -465,7 +524,7 @@ def compute_ln_amplification_hashash_new_single(
     vs30 : float
         Vs30 in m/s (scalar).
     interp_hashash : Dict[str, Array]
-        Pre-interpolated coefficients (f3, f4, f5, Vf, Vg, freq).
+        Pre-interpolated coefficients (f3, f4, f5, Vf, Vg, freq, ir_lim).
 
     Returns
     -------

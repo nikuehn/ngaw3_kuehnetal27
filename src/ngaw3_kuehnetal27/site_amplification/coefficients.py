@@ -31,10 +31,50 @@ def load_coefficients(filepath: Union[str, Path]) -> Dict[str, Array]:
     Returns
     -------
     Dict[str, Array]
-        Dictionary mapping column names to JAX arrays.
+        Dictionary mapping column names to JAX arrays. Empty trailing
+        columns (pandas names them "Unnamed: N"; they come from trailing
+        commas in some CSVs) are dropped.
     """
-    df = pd.read_csv(filepath, comment="#")
+    df = pd.read_csv(filepath, comment="#", encoding="utf-8")
+    df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
     return {col: jnp.array(df[col].values) for col in df.columns}
+
+
+def period_table_to_frequency(
+    raw_coeffs: Dict[str, Array],
+    period_col: str = "Period",
+    freq_col: str = "freq",
+) -> Dict[str, Array]:
+    """
+    Re-express a coefficient table tabulated vs. period (s) as a table vs.
+    frequency (Hz), sorted by ascending frequency.
+
+    PSA coefficient tables are usually given per period T. Everything
+    downstream works in frequency, so the model input is f = 1/T. Since
+    1/T is decreasing in T, the rows are reversed so that the reference
+    frequencies are increasing, which `jnp.interp` requires.
+
+    Parameters
+    ----------
+    raw_coeffs : Dict[str, Array]
+        Raw coefficients as returned by `load_coefficients`.
+    period_col : str
+        Key in `raw_coeffs` holding the periods (s).
+    freq_col : str
+        Key under which the frequencies (Hz) are stored in the output.
+        The period column is not carried over.
+
+    Returns
+    -------
+    Dict[str, Array]
+        Same columns, with `freq_col` (Hz, ascending) instead of
+        `period_col`, and every column reordered to match.
+    """
+    freq = 1.0 / raw_coeffs[period_col]
+    order = jnp.argsort(freq)
+    out = {k: v[order] for k, v in raw_coeffs.items() if k != period_col}
+    out[freq_col] = freq[order]
+    return out
 
 
 def interpolate_coeffs(
