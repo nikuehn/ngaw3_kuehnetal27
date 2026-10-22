@@ -84,7 +84,9 @@ def build_global_dict(data_used_gl, data_eq_gl, data_stat_gl, frequencies_used):
     }
 
 
-def setup_nl_model(nl_model_name: str, frequencies_used_array: jnp.ndarray) -> Dict:
+def setup_nl_model(nl_model_name: str,
+                   frequencies_used_array: jnp.ndarray,
+                   target: str = "EAS") -> Dict:
     """
     Build the `nl_model_dict` passed to model()/guide(), interpolating
     the chosen nonlinear site amplification model's coefficients to
@@ -94,6 +96,8 @@ def setup_nl_model(nl_model_name: str, frequencies_used_array: jnp.ndarray) -> D
     ----------
     nl_model_name : {'hashash_new', 'mahdi'}
     frequencies_used_array : Array
+    target : {'EAS', 'PSA'}
+        Which coefficient tables to load.
 
     Returns
     -------
@@ -102,10 +106,10 @@ def setup_nl_model(nl_model_name: str, frequencies_used_array: jnp.ndarray) -> D
     from ngaw3_kuehnetal27.site_amplification import nl_models
 
     if nl_model_name == 'hashash_new':
-        interp_hashash, interp_sd = nl_models.setup_hashash_new_coefficients(frequencies_used_array)
+        interp_hashash, interp_sd = nl_models.setup_hashash_new_coefficients(frequencies_used_array, target=target)
         return {'model': 'hashash_new', 'interp_hashash': interp_hashash}
     elif nl_model_name == 'mahdi':
-        interp_params, interp_nonlin = nl_models.setup_mahdi_coefficients(frequencies_used_array)
+        interp_params, interp_nonlin = nl_models.setup_mahdi_coefficients(frequencies_used_array, target=target)
         return {'model': 'mahdi', 'interp_params': interp_params, 'interp_nonlin': interp_nonlin}
     else:
         raise ValueError(f"Unknown nl_model_name: {nl_model_name!r}. Expected 'hashash_new' or 'mahdi'.")
