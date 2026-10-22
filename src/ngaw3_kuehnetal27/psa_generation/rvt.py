@@ -46,7 +46,7 @@ and damping are fixed for a given `RvtSea25Operators` instance.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import jax.numpy as jnp
@@ -193,6 +193,20 @@ class RvtSea25Operators:
         self.freqs_extrap = jnp.asarray(freqs_extrap)
         self.baseline, self.M, self.v = build_extrapolation_operator(freqs_pred, freqs_extrap)
 
+        # Split of the extrapolation grid relative to the fitted band, used by
+        # the "parametric" extrapolation (see `extrapolation.py`). The legacy
+        # path above is unaffected. In-band rows of M are pure log-linear
+        # interpolation between the EAS frequencies (baseline and v are 0 there).
+        assert np.all(np.diff(freqs_pred) > 0), "freqs_pred must be strictly ascending"
+        below = freqs_extrap < freqs_pred[0]
+        above = freqs_extrap > freqs_pred[-1]
+        in_band = ~(below | above)
+        self.f_edge_lo = float(freqs_pred[0])
+        self.f_edge_hi = float(freqs_pred[-1])
+        self.freqs_lo = jnp.asarray(freqs_extrap[below])
+        self.freqs_hi = jnp.asarray(freqs_extrap[above])
+        self.M_in = self.M[jnp.asarray(in_band)]
+
         w = _trapz_weights(freqs_extrap)
         wf0 = 2 * w
         wf2 = 2 * w * (2 * jnp.pi * self.freqs_extrap) ** 2
@@ -217,28 +231,21 @@ class RvtSea25Operators:
         self.coef_b = coef_b
 
 
-def rvt_psa_batch(
-    ln_eas: Array, site_atten: Array, duration: Array,
-    ops: RvtSea25Operators,
+def rvt_psa_from_spectrum(
+    ln_eas_extrap: Array, duration: Array, ops: RvtSea25Operators,
     use_nonstationarity_factor: bool = True,
 ) -> Array:
     """
-    Batched RVT EAS-to-PSA conversion (Sea25 peak factor), matching
-    `pyrvt` -- see module docstring for validation.
+    RVT PSA from an already extrapolated spectrum on `ops.freqs_extrap`.
+
+    Shared tail of `rvt_psa_batch`: everything downstream of the
+    extrapolation (moments, peak factor, nonstationarity, rms).
 
     Parameters
     ----------
-    ln_eas : Array, shape (n_scenarios, n_pred)
-        ln(EAS) at `freqs_pred` (the frequencies `ops` was built with).
-    site_atten, duration : Array, shape (n_scenarios,)
-    ops : RvtSea25Operators
-    use_nonstationarity_factor : bool
-
-    Returns
-    -------
-    psa : Array, shape (n_scenarios, n_osc)
+    ln_eas_extrap : Array, shape (n_scenarios, n_extrap)
+    duration : Array, shape (n_scenarios,)
     """
-    ln_eas_extrap = ops.baseline[jnp.newaxis, :] + ln_eas @ ops.M.T + site_atten[:, jnp.newaxis] * ops.v[jnp.newaxis, :]
     fa2 = jnp.exp(ln_eas_extrap) ** 2   # (n_scen, n_extrap)
     fa4 = fa2 ** 2
 
@@ -261,3 +268,57 @@ def rvt_psa_batch(
 
     resp_rms = jnp.sqrt(m0 / duration[:, jnp.newaxis])
     return peak_factor * resp_rms
+
+
+def rvt_psa_batch(
+    ln_eas: Array, site_atten: Optional[Array], duration: Array,
+    ops: RvtSea25Operators,
+    use_nonstationarity_factor: bool = True,
+    extrapolation: Literal["legacy", "parametric"] = "legacy",
+    extrap_delta: Optional[Tuple[Array, Array]] = None,
+) -> Array:
+    """
+    Batched RVT EAS-to-PSA conversion (Sea25 peak factor), matching
+    `pyrvt` -- see module docstring for validation.
+
+    Parameters
+    ----------
+    ln_eas : Array, shape (n_scenarios, n_pred)
+        ln(EAS) at `freqs_pred` (the frequencies `ops` was built with).
+    site_atten, duration : Array, shape (n_scenarios,)
+        `site_atten` is kappa in seconds (exp(-pi*kappa*f)); only used by
+        the "legacy" extrapolation (pass None otherwise).
+    ops : RvtSea25Operators
+    use_nonstationarity_factor : bool
+    extrapolation : {"legacy", "parametric"}
+        "legacy" (default, unchanged behaviour): slope-2 omega-square
+        below the band; above the band a kappa-filtered end point at the
+        highest extrapolation frequency, joined by interpolation that is
+        linear in ln(f).
+        "parametric": add `extrap_delta` (from
+        `extrapolation.parametric_extrap_delta`) to the band-edge
+        predictions; in-band interpolation is the same as legacy.
+    extrap_delta : (delta_lo, delta_hi), required for "parametric"
+        Shapes (n_scenarios, n_lo) and (n_scenarios, n_hi).
+
+    Returns
+    -------
+    psa : Array, shape (n_scenarios, n_osc)
+    """
+    if extrapolation == "legacy":
+        if extrap_delta is not None:
+            raise ValueError("extrap_delta is only used with extrapolation='parametric'")
+        if site_atten is None:
+            raise ValueError("the legacy extrapolation needs site_atten")
+        ln_eas_extrap = (ops.baseline[jnp.newaxis, :] + ln_eas @ ops.M.T
+                         + site_atten[:, jnp.newaxis] * ops.v[jnp.newaxis, :])
+    elif extrapolation == "parametric":
+        if extrap_delta is None:
+            raise ValueError("extrapolation='parametric' needs extrap_delta")
+        delta_lo, delta_hi = extrap_delta
+        ln_eas_extrap = jnp.concatenate(
+            [ln_eas[:, :1] + delta_lo, ln_eas @ ops.M_in.T, ln_eas[:, -1:] + delta_hi], axis=1)
+    else:
+        raise ValueError(f"unknown extrapolation {extrapolation!r}")
+
+    return rvt_psa_from_spectrum(ln_eas_extrap, duration, ops, use_nonstationarity_factor)
