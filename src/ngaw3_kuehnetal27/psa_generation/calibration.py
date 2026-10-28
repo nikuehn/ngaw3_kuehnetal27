@@ -12,7 +12,8 @@ deltaS_raw, deltaB_attn_raw, c_region_raw ~ Normal(0, 1), or
 ZeroSumNormal(1) with `zerosumnormal=True`) and multiplied by their
 standard deviations afterwards. It takes the same input matrices
 (X_rec, X_eq, X_stat, X_id) as `model_eas`, as built by
-`model_inputs.extract_model_arrays`, so `svi_fitting.write_svi_results`
+`model_inputs.extract_model_arrays` (unpacked with
+`model_inputs.unpack_model_inputs`), so `svi_fitting.write_svi_results`
 works for both models.
 
 Design: split the median into a FIXED part and a PER-ITERATION part.
@@ -67,7 +68,7 @@ c_basin_gathered sum).
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import NamedTuple, Optional
+from typing import Optional
 
 import numpy as np
 import jax.numpy as jnp
@@ -76,6 +77,7 @@ import numpyro.distributions as dist
 import pandas as pd
 from patsy import dmatrix
 
+from ngaw3_kuehnetal27.model_inputs import unpack_model_inputs
 from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
 from ngaw3_kuehnetal27.spline_coeff_guide import make_spline_coeff_guide
 from ngaw3_kuehnetal27.numpyro_guides import _zsn_guide_dist
@@ -91,41 +93,6 @@ from ngaw3_kuehnetal27.psa_generation.median_psa import resolve_vs_coefficient
 from ngaw3_kuehnetal27.psa_generation.nn_psa_model import predict as predict_nn
 
 Array = jnp.ndarray
-
-
-# ---------------------------------------------------------------------------
-# Inputs: same matrices as model_eas
-# ---------------------------------------------------------------------------
-
-class CalibrationInputs(NamedTuple):
-    """The columns of X_rec / X_eq / X_stat / X_id, named (see `unpack_model_inputs`)."""
-    R: Array; Rjb: Array; Rx: Array; Ry0: Array                  # (n_rec,)
-    M_eq: Array; Zt_eq: Array; Fnm_eq: Array; Frev_eq: Array     # (n_eq,)
-    FW_eq: Array; Dip_eq: Array; M_sd: Array
-    VS_stat: Array; VS_stat_sd: Array; vs_measured_id: Array     # (n_stat,)
-    eq_id: np.ndarray; stat_id: np.ndarray                       # (n_rec,), int
-    subregion_id: np.ndarray; basin_id: np.ndarray
-    n_rec: int; n_eq: int; n_stat: int; n_subregion: int
-
-
-def unpack_model_inputs(X_rec, X_eq, X_stat, X_id) -> CalibrationInputs:
-    """Unpack the model input matrices with the same column layout as
-    `model_eas` (built by `model_inputs.extract_model_arrays`)."""
-    R, Rjb, Rx, Ry0 = np.asarray(X_rec).T
-    M_eq, Zt_eq, Fnm_eq, Frev_eq, FW_eq, Dip_eq, M_sd = np.asarray(X_eq).T
-    VS_stat, VS_stat_sd, vs_meas_id = np.asarray(X_stat).T
-    eq_id, stat_id, subregion_id, basin_id = np.asarray(X_id).T.astype(int)
-    return CalibrationInputs(
-        R=jnp.asarray(R), Rjb=jnp.asarray(Rjb), Rx=jnp.asarray(Rx), Ry0=jnp.asarray(Ry0),
-        M_eq=jnp.asarray(M_eq), Zt_eq=jnp.asarray(Zt_eq), Fnm_eq=jnp.asarray(Fnm_eq),
-        Frev_eq=jnp.asarray(Frev_eq), FW_eq=jnp.asarray(FW_eq), Dip_eq=jnp.asarray(Dip_eq),
-        M_sd=jnp.asarray(M_sd),
-        VS_stat=jnp.asarray(VS_stat), VS_stat_sd=jnp.asarray(VS_stat_sd),
-        vs_measured_id=np.asarray(vs_meas_id).astype(int),
-        eq_id=eq_id, stat_id=stat_id, subregion_id=subregion_id, basin_id=basin_id,
-        n_rec=len(eq_id), n_eq=np.asarray(X_eq).shape[0], n_stat=np.asarray(X_stat).shape[0],
-        n_subregion=int(np.max(subregion_id)) + 1,
-    )
 
 
 def _spline_basis(F, spline_degree, spline_df):
