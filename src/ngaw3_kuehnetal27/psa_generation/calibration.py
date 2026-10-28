@@ -1,36 +1,61 @@
 """
 Calibration ("partitioning") of an already-fitted PSA model -- parametric
 or NN -- against observed PSA data: estimates event terms (deltaB), site
-terms (deltaS), an optional regional random effect (c_region), an
-overall per-frequency additive correction (c_add), and the associated
-variance components (tau, phi_ss, phi_s2s, tau_attn), plus the model's
-own residual misfit (nu_rec, a StudentT df).
+terms (deltaS), an overall per-frequency additive correction (c_add), the
+associated variance components (tau, phi_ss, phi_s2s, tau_attn), the
+model's own residual misfit (nu_rec, a StudentT df) and, optionally, a
+hanging-wall term (c_hw) and a regional random effect (c_region).
+
+The model is parameterized exactly like `model_eas` (numpyro_models.py):
+the random effects are sampled on the "raw" scale (deltaB_raw,
+deltaS_raw, deltaB_attn_raw, c_region_raw ~ Normal(0, 1), or
+ZeroSumNormal(1) with `zerosumnormal=True`) and multiplied by their
+standard deviations afterwards. It takes the same input matrices
+(X_rec, X_eq, X_stat, X_id) as `model_eas`, as built by
+`model_inputs.extract_model_arrays`, so `svi_fitting.write_svi_results`
+works for both models.
 
 Design: split the median into a FIXED part and a PER-ITERATION part.
 
 FIXED (computed once, outside the SVI loop -- never depends on anything
 sampled here, only on already-fitted coefficients/weights and the data):
     median_ref       -- median at Vs30=800, ref_basin_id, no random
-                         effects, no NL amplification, no hanging-wall
-                         term (see below).
+                         effects, no NL amplification (and, if
+                         `include_hw`, no hanging-wall term).
     site_adjustment  -- median_site - median_ref, holding M/R/... fixed
                          at their actual per-record values -- the
                          combined Vs30 + basin correction.
 
 PER-ITERATION (must be recomputed every SVI step, since it depends on
 sampled random effects):
-    c_add, c_hw, deltaB, deltaS, deltaB_attn, c_region, and f_nl
-    (nonlinear site amplification depends on the random-effect-adjusted
-    median).
+    c_add, deltaB, deltaS, deltaB_attn, optionally c_hw and c_region, and
+    f_nl (nonlinear site amplification depends on the random-effect-
+    adjusted median).
 
-Hanging wall (c_hw) is estimated fresh here, NOT taken from the fitted
-PSA model's own coefficients -- `sample_scenarios` (EAS side) only ever
-generates footwall geometry (see `FOOTWALL_GEOMETRY`), so neither the
-parametric PSA model nor the NN ever saw real hanging-wall variation;
-whatever "c_hw" the PSA fit itself produced is confounded with c_0, not
-a real effect. Real observed data does include hanging-wall records, so
-c_hw needs a genuine estimate here, on top of median_ref/site_adjustment
-for either precompute path.
+What `include_hw` and `include_region` mean
+-------------------------------------------
+Both flags say "estimate this term HERE, on top of the fixed median".
+Set them to False when the term is already part of the PSA model's
+predictions -- estimating it again would only soak up whatever misfit is
+left, and for c_hw the prior (mean 0.5) is only appropriate when the
+median has no hanging-wall term yet.
+
+    * Sampling (`sample_scenarios`, incl. hanging-wall geometry) and the
+      PSA fit/NN both contain the term -> include_hw=False.
+    * The sampling/NN used `subregion_id` (regional EAS terms are in the
+      predictions) -> include_region=False. With True, c_region would
+      only estimate the *remaining* regional misfit (e.g. region-
+      dependent RVT bias); it is not needed for the calibration.
+    * The PSA model does NOT contain the term (e.g. NN trained without
+      subregion_id, or without hanging-wall predictors) -> True, so the
+      term is estimated from the observed data and not left in the
+      event/site terms.
+
+For the parametric precompute use the same `include_hw` value in
+`compute_median_ref_and_site_adjustment_parametric` and in
+`model_psa_calibration`. The NN precompute cannot remove a hanging-wall
+dependence the NN may have; with include_hw=True the NN must not use
+hanging-wall predictors.
 
 `compute_median_ref_and_site_adjustment_parametric` and `..._nn` both
 just produce `(median_ref, site_adjustment)` -- `model_psa_calibration`
@@ -42,7 +67,7 @@ c_basin_gathered sum).
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import jax.numpy as jnp
@@ -53,6 +78,7 @@ from patsy import dmatrix
 
 from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
 from ngaw3_kuehnetal27.spline_coeff_guide import make_spline_coeff_guide
+from ngaw3_kuehnetal27.numpyro_guides import _zsn_guide_dist
 from ngaw3_kuehnetal27.median_core import (
     Coefficients, EventParams, ModelConstants, SiteParams, predict_median,
 )
@@ -68,25 +94,75 @@ Array = jnp.ndarray
 
 
 # ---------------------------------------------------------------------------
+# Inputs: same matrices as model_eas
+# ---------------------------------------------------------------------------
+
+class CalibrationInputs(NamedTuple):
+    """The columns of X_rec / X_eq / X_stat / X_id, named (see `unpack_model_inputs`)."""
+    R: Array; Rjb: Array; Rx: Array; Ry0: Array                  # (n_rec,)
+    M_eq: Array; Zt_eq: Array; Fnm_eq: Array; Frev_eq: Array     # (n_eq,)
+    FW_eq: Array; Dip_eq: Array; M_sd: Array
+    VS_stat: Array; VS_stat_sd: Array; vs_measured_id: Array     # (n_stat,)
+    eq_id: np.ndarray; stat_id: np.ndarray                       # (n_rec,), int
+    subregion_id: np.ndarray; basin_id: np.ndarray
+    n_rec: int; n_eq: int; n_stat: int; n_subregion: int
+
+
+def unpack_model_inputs(X_rec, X_eq, X_stat, X_id) -> CalibrationInputs:
+    """Unpack the model input matrices with the same column layout as
+    `model_eas` (built by `model_inputs.extract_model_arrays`)."""
+    R, Rjb, Rx, Ry0 = np.asarray(X_rec).T
+    M_eq, Zt_eq, Fnm_eq, Frev_eq, FW_eq, Dip_eq, M_sd = np.asarray(X_eq).T
+    VS_stat, VS_stat_sd, vs_meas_id = np.asarray(X_stat).T
+    eq_id, stat_id, subregion_id, basin_id = np.asarray(X_id).T.astype(int)
+    return CalibrationInputs(
+        R=jnp.asarray(R), Rjb=jnp.asarray(Rjb), Rx=jnp.asarray(Rx), Ry0=jnp.asarray(Ry0),
+        M_eq=jnp.asarray(M_eq), Zt_eq=jnp.asarray(Zt_eq), Fnm_eq=jnp.asarray(Fnm_eq),
+        Frev_eq=jnp.asarray(Frev_eq), FW_eq=jnp.asarray(FW_eq), Dip_eq=jnp.asarray(Dip_eq),
+        M_sd=jnp.asarray(M_sd),
+        VS_stat=jnp.asarray(VS_stat), VS_stat_sd=jnp.asarray(VS_stat_sd),
+        vs_measured_id=np.asarray(vs_meas_id).astype(int),
+        eq_id=eq_id, stat_id=stat_id, subregion_id=subregion_id, basin_id=basin_id,
+        n_rec=len(eq_id), n_eq=np.asarray(X_eq).shape[0], n_stat=np.asarray(X_stat).shape[0],
+        n_subregion=int(np.max(subregion_id)) + 1,
+    )
+
+
+def _spline_basis(F, spline_degree, spline_df):
+    ln_F = np.log(F)
+    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
+    return dmatrix(
+        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
+        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Precompute: parametric model
 # ---------------------------------------------------------------------------
 
 def compute_median_ref_and_site_adjustment_parametric(
-    R: Array, Rx: Array, Ry0: Array, F: Array,
-    evt_by_eq: EventParams,      # (n_eq,) -- M_model here IS M_eq, no mag. uncertainty
-    site_by_stat: SiteParams,    # (n_stat,)
-    eq_id: Array, stat_id: Array, basin_id: Array,  # (n_records,)
+    F: Array, X_rec: Array, X_eq: Array, X_stat: Array, X_id: Array,
     coef: Coefficients,            # c_0, c_m1..c_m3, c_zt, c_gs1, c_nm, c_rev, c_attn,
                                     # c_nft*, gs_break/zt_break/gs_exp -- from summary_stats
-                                    # (fixed). c_vs AND c_hw are ignored (zeroed internally):
-                                    # c_hw is excluded from median_ref -- see module docstring.
+                                    # (fixed). c_vs is ignored (lnVS=0 at the reference).
     const: ModelConstants,
     vs_hinge_params: dict,        # c_vs_meas_ic/sl1/sl2/br, c_vs_est_ic/sl1/sl2/br
     c_basin_table: Array,         # (n_basin, n_freq)
     ref_vs30: float = 800.0,
     func_gs_scaling: str = "stafford",
+    include_hw: bool = False,
 ):
     """
+    Same input matrices as `model_eas` / `model_psa_calibration`.
+
+    include_hw : bool
+        Same flag as in `model_psa_calibration`. True: the calibration
+        estimates c_hw, so the PSA model's own c_hw is zeroed in
+        `median_ref`. False (default): hanging wall is already in the PSA
+        model (sampling included hanging-wall geometry), so its c_hw is
+        kept in `median_ref`.
+
     Returns
     -------
     median_ref : Array, shape (n_records, n_freq)
@@ -94,41 +170,41 @@ def compute_median_ref_and_site_adjustment_parametric(
         vs_term (continuous, magnitude-dependent -- see
         `resolve_vs_coefficient`) + c_basin_table[basin_id].
     """
-    n_records = eq_id.shape[0]
+    inp = unpack_model_inputs(X_rec, X_eq, X_stat, X_id)
+    eq_id, stat_id = inp.eq_id, inp.stat_id
 
     evt = EventParams(
-        M_model=evt_by_eq.M_model[eq_id],
-        Dip_eq=evt_by_eq.Dip_eq[eq_id],
-        FW_eq=evt_by_eq.FW_eq[eq_id],
-        Zt_eq=evt_by_eq.Zt_eq[eq_id],
-        Zt_eq_scaled=evt_by_eq.Zt_eq_scaled[eq_id],
-        Fnm_eq=evt_by_eq.Fnm_eq[eq_id],
-        Frev_eq=evt_by_eq.Frev_eq[eq_id],
+        M_model=inp.M_eq[eq_id],       # M_model IS M_eq, no mag. uncertainty
+        Dip_eq=inp.Dip_eq[eq_id],
+        FW_eq=inp.FW_eq[eq_id],
+        Zt_eq=inp.Zt_eq[eq_id],
+        Zt_eq_scaled=inp.Zt_eq[eq_id] / 10.0,
+        Fnm_eq=inp.Fnm_eq[eq_id],
+        Frev_eq=inp.Frev_eq[eq_id],
     )
-    vs_measured_id_rec = site_by_stat.vs_measured_id[stat_id]
+    vs_measured_id_rec = inp.vs_measured_id[stat_id]
 
     # lnVS=0 at the reference Vs30 -- coef.c_vs * lnVS is zero here no
     # matter what coef.c_vs is, so a (n_freq,) zero placeholder is fine.
     site_ref = SiteParams(
-        VS_stat=jnp.full(n_records, ref_vs30),
-        lnVS=jnp.zeros(n_records),
+        VS_stat=jnp.full(inp.n_rec, ref_vs30),
+        lnVS=jnp.zeros(inp.n_rec),
         vs_measured_id=vs_measured_id_rec,
     )
-    R_scaled = R / 100.0
+    R_scaled = inp.R / 100.0
 
-    # c_hw is deliberately excluded here -- estimated fresh in
-    # model_psa_calibration instead (see module docstring).
-    coef = replace(coef, c_hw=jnp.zeros_like(coef.c_hw))
+    if include_hw:
+        coef = replace(coef, c_hw=jnp.zeros_like(coef.c_hw))
 
     median_ref, _ = predict_median(
-        R, Rx, Ry0, F, R_scaled, evt, site_ref, coef, const,
+        inp.R, inp.Rx, inp.Ry0, F, R_scaled, evt, site_ref, coef, const,
         func_gs_scaling=func_gs_scaling, nl_model_dict=None,
     )
 
     vs_term = resolve_vs_coefficient(
         "continuous", vs_measured_id_rec, evt.M_model, **vs_hinge_params,
     )
-    site_adjustment = vs_term + c_basin_table[basin_id]
+    site_adjustment = vs_term + c_basin_table[inp.basin_id]
 
     return median_ref, site_adjustment
 
@@ -189,67 +265,76 @@ def _resolve_f_nl(median_before_nl, VS_stat_rec, M_rec, nl_model_dict):
 
 
 def model_psa_calibration(
-    F, eq_id, stat_id, subregion_id, R, Rx, Ry0, VS_stat, vs_measured_id_stat,
-    M_eq, Dip_eq, FW_eq, Zt_eq,
+    F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     median_ref, site_adjustment,
-    nl_model_dict,
     Y=None,
     attn_eq=True,
-    include_region=True,
+    include_region=False,
+    include_hw=False,
     spline_degree=3, spline_df=7,
-    calc_dWS=False, save_f_nl=False, calc_log_lik=False,
-    L_freq=None,
+    calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
+    L_freq=None, zerosumnormal=False,
 ):
     """
     Parameters
     ----------
     F : array, shape (n_freq,)
-    eq_id, stat_id, subregion_id, R, Rx, Ry0 : array, shape (n_records,)
-        `subregion_id` is ignored if `include_region=False`. Rx, Ry0 are
-        record-level (station-to-fault geometry) -- unlike M/Dip/FW/Zt,
-        which are per-event.
-    VS_stat, vs_measured_id_stat : array, shape (n_stat,)
-        `vs_measured_id_stat` (0=measured, 1=estimated) selects the
-        phi_s2s category per station.
-    M_eq, Dip_eq, FW_eq, Zt_eq : array, shape (n_eq,)
-        Used only for the hanging-wall term (`c_hw`, estimated fresh
-        here -- see module docstring) and, for M_eq, the NL model input
-        and tau/phi_ss magnitude dependence.
-    median_ref, site_adjustment : array, shape (n_records, n_freq)
-        See `compute_median_ref_and_site_adjustment_parametric`/`..._nn`.
+    X_rec, X_eq, X_stat, X_id : arrays
+        Same matrices (and column layout) as `model_eas`, from
+        `model_inputs.extract_model_arrays`. Only the columns the model
+        needs are used (R, Rx, Ry0; M_eq, and for `include_hw` Zt/FW/Dip;
+        VS_stat, vs_measured_id; the four ids).
     nl_model_dict : dict
         {'model': 'mahdi'|'hashash_new', plus that model's interpolated
         coefficient dicts} -- required here (unlike the fitting models,
         calibration always needs a real NL model to add back on top of
         the linear-site median_ref/site_adjustment).
+    median_ref, site_adjustment : array, shape (n_records, n_freq)
+        See `compute_median_ref_and_site_adjustment_parametric`/`..._nn`.
     Y : array, shape (n_records, n_freq), optional
-    include_region : bool
-        Whether to estimate a regional random effect (c_region) on top
-        of event/site terms. Only meaningful if the underlying model
-        (sampling and/or the PSA fit) was itself built with regions;
-        keeping that consistent is the caller's responsibility.
+    attn_eq : bool
+        Event-specific attenuation term (deltaB_attn), as in `model_eas`.
+    include_region : bool, default False
+        Estimate a regional random effect (c_region) on top of the event
+        and site terms. Use False when the sampling/PSA model already
+        contains regional terms (e.g. NN trained with `subregion_id`):
+        the regional variation is then already in `median_ref`. Use True
+        when it does not and the observed data should determine it (also
+        see the module docstring).
+    include_hw : bool, default False
+        Estimate a hanging-wall term (c_hw) here. Use False when the
+        sampling and the PSA model already include hanging-wall scaling;
+        True when they do not (then c_hw must also be zeroed in
+        `median_ref` -- same flag in the parametric precompute).
+    L_freq : array, shape (n_freq, n_freq), optional
+        Cholesky factor of the frequency correlation of the regional
+        effect; identity if None.
+    zerosumnormal : bool
+        Raw random effects ZeroSumNormal(1) instead of Normal(0, 1), as
+        in `model_eas`. Must match `guide_psa_calibration`.
+    save_ranef : bool
+        Save deltaS, deltaB, deltaB_attn and c_region as deterministic
+        sites (as `model_eas` does).
     """
-    n_records = eq_id.shape[0]
-    n_eq = int(np.max(eq_id)) + 1
-    n_stat = int(np.max(stat_id)) + 1
+    inp = unpack_model_inputs(X_rec, X_eq, X_stat, X_id)
+    eq_id, stat_id, subregion_id = inp.eq_id, inp.stat_id, inp.subregion_id
+    n_rec, n_eq, n_stat, n_subregion = inp.n_rec, inp.n_eq, inp.n_stat, inp.n_subregion
+    M_eq = inp.M_eq
+    vs_measured_id = inp.vs_measured_id
     n_freq = len(F)
-    R_scaled = R / 100.0
+    R_scaled = inp.R / 100.0
 
-    ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = _spline_basis(F, spline_degree, spline_df)
 
     const = ModelConstants()
     mu_freq = jnp.zeros(n_freq)
     L_freq = L_freq if L_freq is not None else jnp.eye(n_freq)
 
     c_add = make_spline_coeff(spline_basis, "c_add", mu_loc=0.0, mu_scale=5.0)
-    c_hw = make_spline_coeff(spline_basis, "c_hw", mu_loc=0.5, mu_scale=0.5)
+    if include_hw:
+        c_hw = make_spline_coeff(spline_basis, "c_hw", mu_loc=0.5, mu_scale=0.5)
 
-    # --- standard deviations / random effects ---
+    # --- standard deviations ---
     phi_s2s_meas = make_spline_coeff(spline_basis, "phi_s2s_meas", mu_loc=-0.7, mu_scale=0.5,
                                       positive=True, transform="softplus")
     phi_s2s_est = make_spline_coeff(spline_basis, "phi_s2s_est", mu_loc=-0.7, mu_scale=0.5,
@@ -280,45 +365,80 @@ def model_psa_calibration(
         mag_sd[:, jnp.newaxis], tau_0, tau_1, const.mb1, const.mb2, delta=0.2,
     )))
 
-    # --- regional random effect (optional -- see docstring) ---
-    if include_region:
-        n_region = int(np.max(subregion_id)) + 1
-        sigma_region = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
-                                          positive=True, transform="softplus")
-        L_region = sigma_region[..., None] * L_freq
-        with numpyro.plate("plate_region", n_region, dim=-1):
-            c_region = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_region))
-
+    # --- raw random effects (same structure as model_eas) ---
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         nu_rec = numpyro.sample("nu_rec", dist.Gamma(2, 0.1))
 
-        with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            deltaS = numpyro.sample("deltaS", dist.TransformedDistribution(
-                dist.Normal(0, 1), dist.transforms.AffineTransform(0, phi_s2s[vs_measured_id_stat]),
-            ))
-
-        with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            deltaB = numpyro.sample("deltaB", dist.TransformedDistribution(
-                dist.Normal(0, 1), dist.transforms.AffineTransform(0, tau),
-            ))
+        if zerosumnormal:
+            # event axis last inside the frequency plate -> (n_freq, n)
+            if include_region:
+                c_region_raw = numpyro.sample(
+                    "c_region_raw", dist.ZeroSumNormal(1.0, event_shape=(n_subregion,)))
+            deltaS_raw = numpyro.sample(
+                "deltaS_raw", dist.ZeroSumNormal(1.0, event_shape=(n_stat,)))
+            deltaB_raw = numpyro.sample(
+                "deltaB_raw", dist.ZeroSumNormal(1.0, event_shape=(n_eq,)))
             if attn_eq:
-                deltaB_attn = numpyro.sample("deltaB_attn", dist.TransformedDistribution(
-                    dist.Normal(0, 1), dist.transforms.AffineTransform(0, tau_attn),
-                ))
-            else:
-                deltaB_attn = jnp.zeros((n_eq, n_freq))
+                deltaB_attn_raw = numpyro.sample(
+                    "deltaB_attn_raw", dist.ZeroSumNormal(1.0, event_shape=(n_eq,)))
+        else:
+            if include_region:
+                with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                    c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
+
+            with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
+                deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
+
+            with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
+                deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
+                if attn_eq:
+                    deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
+
+    if zerosumnormal:
+        # back to (n, n_freq), as in the Normal parameterization
+        deltaS_raw = deltaS_raw.T
+        deltaB_raw = deltaB_raw.T
+        if attn_eq:
+            deltaB_attn_raw = deltaB_attn_raw.T
+        if include_region:
+            c_region_raw = c_region_raw.T
+
+    deltaS = deltaS_raw * phi_s2s[vs_measured_id]
+    deltaB = deltaB_raw * tau
+    if attn_eq:
+        deltaB_attn = deltaB_attn_raw * tau_attn
+    else:
+        deltaB_attn = jnp.zeros((n_eq, n_freq))
+
+    # --- regional random effect (optional -- see docstring) ---
+    if include_region:
+        sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
+                                            positive=True, transform="softplus")
+        L_subregion = sigma_subregion[..., None] * L_freq
+        c_subregion = mu_freq[jnp.newaxis, :] + c_region_raw @ L_subregion.T
+    else:
+        c_subregion = jnp.zeros((n_subregion, n_freq))
+
+    if save_ranef:
+        numpyro.deterministic("deltaS", deltaS)
+        numpyro.deterministic("deltaB", deltaB)
+        numpyro.deterministic("deltaB_attn", deltaB_attn)
+        numpyro.deterministic("c_region", c_subregion)
 
     # --- per-iteration median assembly ---
     M_rec = M_eq[eq_id]
-    hw_term = calculate_hw_scaling(M_rec, Dip_eq[eq_id], FW_eq[eq_id], Rx, Zt_eq[eq_id], Ry0)
 
-    median_before_nl = median_ref + c_add + c_hw * hw_term[:, jnp.newaxis] + deltaB[eq_id] + deltaS[stat_id]
+    median_before_nl = median_ref + c_add + deltaB[eq_id] + deltaS[stat_id]
+    if include_hw:
+        hw_term = calculate_hw_scaling(
+            M_rec, inp.Dip_eq[eq_id], inp.FW_eq[eq_id], inp.Rx, inp.Zt_eq[eq_id], inp.Ry0)
+        median_before_nl = median_before_nl + c_hw * hw_term[:, jnp.newaxis]
     if include_region:
-        median_before_nl = median_before_nl + c_region[subregion_id]
+        median_before_nl = median_before_nl + c_subregion[subregion_id]
     if attn_eq:
         median_before_nl = median_before_nl + deltaB_attn[eq_id] * R_scaled[:, jnp.newaxis]
 
-    VS_stat_rec = VS_stat[stat_id]
+    VS_stat_rec = inp.VS_stat[stat_id]
     f_nl = _resolve_f_nl(median_before_nl, VS_stat_rec, M_rec, nl_model_dict)
 
     median = median_before_nl + f_nl + site_adjustment
@@ -333,10 +453,10 @@ def model_psa_calibration(
         Y_obs = Y[obs_mask]
         median_obs = median[obs_mask]
         scale_obs = phi_ss[obs_mask]
-        df_obs = (jnp.ones((n_records, n_freq)) * nu_rec)[obs_mask]
+        df_obs = (jnp.ones((n_rec, n_freq)) * nu_rec)[obs_mask]
 
         if calc_log_lik:
-            with numpyro.plate("data", n_records):
+            with numpyro.plate("data", n_rec):
                 numpyro.deterministic(
                     "obs_log_lik",
                     dist.StudentT(loc=median_obs, scale=scale_obs, df=df_obs).log_prob(Y_obs),
@@ -345,38 +465,36 @@ def model_psa_calibration(
         Y_obs = None
         median_obs = median
         scale_obs = phi_ss
-        df_obs = jnp.ones((n_records, n_freq)) * nu_rec
+        df_obs = jnp.ones((n_rec, n_freq)) * nu_rec
 
     numpyro.sample("obs", dist.StudentT(loc=median_obs, scale=scale_obs, df=df_obs), obs=Y_obs)
 
 
 def guide_psa_calibration(
-    F, eq_id, stat_id, subregion_id, R, Rx, Ry0, VS_stat, vs_measured_id_stat,
-    M_eq, Dip_eq, FW_eq, Zt_eq,
+    F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     median_ref, site_adjustment,
-    nl_model_dict,
     Y=None,
     attn_eq=True,
-    include_region=True,
+    include_region=False,
+    include_hw=False,
     spline_degree=3, spline_df=7,
-    calc_dWS=False, save_f_nl=False, calc_log_lik=False,
-    L_freq=None,
+    calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
+    L_freq=None, zerosumnormal=False,
 ):
     """Guide for `model_psa_calibration` -- same arguments, same rules
-    (must match the model's attn_eq/include_region on every call)."""
-    n_eq = int(np.max(eq_id)) + 1
-    n_stat = int(np.max(stat_id)) + 1
+    (must match the model's attn_eq/include_region/include_hw/zerosumnormal
+    on every call). Site and param names follow `guide_eas`
+    (loc_/scale_ of the *_raw sites)."""
+    n_eq = np.asarray(X_eq).shape[0]
+    n_stat = np.asarray(X_stat).shape[0]
+    n_subregion = int(np.max(np.asarray(X_id)[:, 2])) + 1
     n_freq = len(F)
 
-    ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = _spline_basis(F, spline_degree, spline_df)
 
     make_spline_coeff_guide(spline_basis, "c_add", monotonic=None, init_mu=0.0)
-    make_spline_coeff_guide(spline_basis, "c_hw", monotonic=None, init_mu=0.5)
+    if include_hw:
+        make_spline_coeff_guide(spline_basis, "c_hw", monotonic=None, init_mu=0.5)
 
     make_spline_coeff_guide(spline_basis, "phi_s2s_meas", monotonic=None, init_mu=-0.7)
     make_spline_coeff_guide(spline_basis, "phi_s2s_est", monotonic=None, init_mu=-0.7)
@@ -390,20 +508,7 @@ def guide_psa_calibration(
     make_spline_coeff_guide(spline_basis, "tau_1", monotonic=None, init_mu=-0.7)
 
     if include_region:
-        n_region = int(np.max(subregion_id)) + 1
         make_spline_coeff_guide(spline_basis, "sigma_region", monotonic=None, init_mu=-0.7)
-        with numpyro.plate("plate_region", n_region, dim=-1):
-            numpyro.sample(
-                "c_region",
-                dist.MultivariateNormal(
-                    loc=numpyro.param("loc_c_region", jnp.zeros((n_region, n_freq))),
-                    scale_tril=numpyro.param(
-                        "scale_tril_c_region",
-                        jnp.tile(jnp.eye(n_freq) * 0.2, (n_region, 1, 1)),
-                        constraint=dist.constraints.lower_cholesky,
-                    ),
-                ),
-            )
 
     with numpyro.plate("plate_freq", n_freq, dim=-1):
         numpyro.sample("nu_rec", dist.TransformedDistribution(
@@ -411,22 +516,40 @@ def guide_psa_calibration(
             transforms=dist.transforms.ExpTransform(),
         ))
 
-        with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            numpyro.sample("deltaS", dist.Normal(
-                loc=numpyro.param("loc_deltaS", jnp.zeros((n_stat, n_freq))),
-                scale=numpyro.param("scale_deltaS", 0.2 * jnp.ones((n_stat, n_freq)),
-                                     constraint=dist.constraints.positive),
-            ))
-
-        with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            numpyro.sample("deltaB", dist.Normal(
-                loc=numpyro.param("loc_deltaB", jnp.zeros((n_eq, n_freq))),
-                scale=numpyro.param("scale_deltaB", 0.2 * jnp.ones((n_eq, n_freq)),
-                                     constraint=dist.constraints.positive),
-            ))
+        if zerosumnormal:
+            if include_region:
+                numpyro.sample("c_region_raw",
+                               _zsn_guide_dist("c_region_raw", (n_freq,), n_subregion))
+            numpyro.sample("deltaS_raw", _zsn_guide_dist("deltaS_raw", (n_freq,), n_stat))
+            numpyro.sample("deltaB_raw", _zsn_guide_dist("deltaB_raw", (n_freq,), n_eq))
             if attn_eq:
-                numpyro.sample("deltaB_attn", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_attn", jnp.zeros((n_eq, n_freq))),
-                    scale=numpyro.param("scale_deltaB_attn", 0.2 * jnp.ones((n_eq, n_freq)),
+                numpyro.sample("deltaB_attn_raw",
+                               _zsn_guide_dist("deltaB_attn_raw", (n_freq,), n_eq))
+        else:
+            if include_region:
+                with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                    numpyro.sample("c_region_raw", dist.Normal(
+                        loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
+                        scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
+                                            constraint=dist.constraints.positive),
+                    ))
+
+            with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
+                numpyro.sample("deltaS_raw", dist.Normal(
+                    loc=numpyro.param("loc_deltaS_raw", jnp.zeros((n_stat, n_freq))),
+                    scale=numpyro.param("scale_deltaS_raw", 0.2 * jnp.ones((n_stat, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
+
+            with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
+                numpyro.sample("deltaB_raw", dist.Normal(
+                    loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
+                    scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
+                                         constraint=dist.constraints.positive),
+                ))
+                if attn_eq:
+                    numpyro.sample("deltaB_attn_raw", dist.Normal(
+                        loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
+                        scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
+                                             constraint=dist.constraints.positive),
+                    ))
