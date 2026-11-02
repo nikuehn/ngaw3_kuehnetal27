@@ -84,7 +84,11 @@ from ngaw3_kuehnetal27.numpyro_guides import _zsn_guide_dist
 from ngaw3_kuehnetal27.median_core import (
     Coefficients, EventParams, ModelConstants, SiteParams, predict_median,
 )
-from ngaw3_kuehnetal27.utils import smooth_trilinear_ramp_repar, calculate_hw_scaling
+from ngaw3_kuehnetal27.utils import (
+        smooth_trilinear_ramp_repar,
+        calculate_hw_scaling,
+        logistic_hinge
+)
 from ngaw3_kuehnetal27.site_amplification.nl_models import (
     compute_ln_amplification_hashash_new,
     compute_ln_amplification_mahdi,
