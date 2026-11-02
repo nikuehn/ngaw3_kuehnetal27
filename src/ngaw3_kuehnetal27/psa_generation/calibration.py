@@ -301,7 +301,7 @@ def model_psa_calibration(
         Rb_attneq = numpyro.sample("Rb_attneq", dist.Gamma(14.1, 18))
     else:
         Rb_attneq = 0
-    R_scaled = jnp.where(inp.R / 100 < Rb_attneq, 0.0, inp.R / 100.0 - Rb_attneq)
+    R_scaled = logistic_hinge(inp.R / 100, 0.0, 1.0, Rb_attneq, delta= 0.1)
 
     c_add = make_spline_coeff(spline_basis, "c_add", mu_loc=0.0, mu_scale=5.0)
     if include_hw:
