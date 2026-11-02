@@ -241,6 +241,7 @@ def model_psa_calibration(
     spline_degree=3, spline_df=7,
     calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
     L_freq=None, zerosumnormal=False,
+    estimate_Rb_attneq = False,
 ):
     """
     Parameters
@@ -289,13 +290,18 @@ def model_psa_calibration(
     M_eq = inp.M_eq
     vs_measured_id = inp.vs_measured_id
     n_freq = len(F)
-    R_scaled = inp.R / 100.0
 
     spline_basis = _spline_basis(F, spline_degree, spline_df)
 
     const = ModelConstants()
     mu_freq = jnp.zeros(n_freq)
     L_freq = L_freq if L_freq is not None else jnp.eye(n_freq)
+
+    if estimate_Rb_attneq:
+        Rb_attneq = numpyro.sample("Rb_attneq", dist.Gamma(14.1, 18))
+    else:
+        Rb_attneq = 0
+    R_scaled = inp.R / 100.0 - Rb_attneq
 
     c_add = make_spline_coeff(spline_basis, "c_add", mu_loc=0.0, mu_scale=5.0)
     if include_hw:
@@ -447,6 +453,7 @@ def guide_psa_calibration(
     spline_degree=3, spline_df=7,
     calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
     L_freq=None, zerosumnormal=False,
+    estimate_Rb_attneq = False,
 ):
     """Guide for `model_psa_calibration` -- same arguments, same rules
     (must match the model's attn_eq/include_region/include_hw/zerosumnormal
@@ -456,6 +463,12 @@ def guide_psa_calibration(
     n_stat = np.asarray(X_stat).shape[0]
     n_subregion = int(np.max(np.asarray(X_id)[:, 2])) + 1
     n_freq = len(F)
+
+    if estimate_Rb_attneq:
+        numpyro.sample("Rb_attneq", dist.TransformedDistribution(
+            dist.Delta(v=numpyro.param("loc_log_Rb_attneq", 4.0)),
+            transforms=dist.transforms.ExpTransform(),
+        ))
 
     spline_basis = _spline_basis(F, spline_degree, spline_df)
 
