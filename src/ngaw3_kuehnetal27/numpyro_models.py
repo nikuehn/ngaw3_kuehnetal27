@@ -14,9 +14,8 @@ import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from patsy import dmatrix
 
-from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
+from ngaw3_kuehnetal27.spline_coeff import make_spline_basis, make_spline_coeff
 from ngaw3_kuehnetal27.coefficient_sharing import (
     DEFAULT_COEFFICIENT_SHARING,
     DEFAULT_PRIOR,
@@ -24,6 +23,7 @@ from ngaw3_kuehnetal27.coefficient_sharing import (
     sample_c0_coefficient,
     sample_cgs1_coefficient,
     sample_coefficient_separate,
+    sample_Rb_attneq,
 )
 from ngaw3_kuehnetal27.median_core import (
     Coefficients,
@@ -38,6 +38,7 @@ from ngaw3_kuehnetal27.utils import (
     compute_magnitude_gradients,
     compute_magnitude_gradients_lh,
     insert_zero_row,
+    attn_eq_distance,
 )
 
 
@@ -56,7 +57,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
               estimate_cvs=True, amp1d_dict=None, prior_config=None,
-              include_region=True, zerosumnormal=False):
+              include_region=True, zerosumnormal=False,
+              estimate_Rb_attneq=False, Rb_attneq=0.0):
     """
     zerosumnormal : bool, default False
         False: raw random effects are iid Normal(0, 1) (original behavior).
@@ -74,7 +76,21 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         (and the *_gl versions) keep their usual (n, n_freq) shape.
         Kappa sites are (n,) either way.
 
-    Must be matched by the same `zerosumnormal` value in `guide_eas`.
+    estimate_Rb_attneq : bool, default False
+        True: the distance (in units of 100 km) from which the
+        event-specific distance slope `deltaB_attn` starts, `Rb_attneq`,
+        is estimated (Gamma prior, logistic hinge). Without such a break
+        the event-specific slope acts from R = 0 and the variance grows
+        unreasonably large with distance. Needs `attn_eq=True`.
+    Rb_attneq : float, default 0.0
+        Fixed break distance (units of 100 km) used when
+        `estimate_Rb_attneq=False` (sharp hinge via `jnp.where`); 0.0
+        reproduces the former behavior (slope from R = 0). Also used for
+        the global dataset. The mean attenuation (`c_attn`) is not
+        affected.
+
+    Must be matched by the same `zerosumnormal`, `estimate_Rb_attneq` and
+    `Rb_attneq` values in `guide_eas`.
     """
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
@@ -91,13 +107,16 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     Zt_eq_scaled = Zt_eq / 10.0
     R_scaled = R / 100.0
+    if estimate_Rb_attneq and not attn_eq:
+        raise ValueError("estimate_Rb_attneq=True needs attn_eq=True")
+    if attn_eq:
+        Rb_attneq = sample_Rb_attneq(estimate_Rb_attneq, Rb_attneq)
+        R_scaled_eq = attn_eq_distance(R_scaled, Rb_attneq, smooth=estimate_Rb_attneq)
+    else:
+        R_scaled_eq = None
 
     ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     n_stat = X_stat.shape[0]
     n_eq = X_eq.shape[0]
@@ -456,7 +475,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     )
 
     median, f_nl = calculate_median_training(
-        R=R, Rx=Rx, Ry0=Ry0, F=F, R_scaled=R_scaled, dist_cell=dist_cell,
+        R=R, Rx=Rx, Ry0=Ry0, F=F, R_scaled=R_scaled, R_scaled_eq=R_scaled_eq, dist_cell=dist_cell,
         idx=idx, evt_by_eq=ev_params, site_by_stat=site_params,
         coef=coef_wus, const=const, func_gs_scaling=func_gs_scaling,
         nl_model_dict=nl_model_dict,
@@ -540,6 +559,8 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
         Zt_eq_scaled_gl = Zt_eq_gl / 10.0
         R_scaled_gl = R_gl / 100.0
+        R_scaled_eq_gl = (attn_eq_distance(R_scaled_gl, Rb_attneq, smooth=estimate_Rb_attneq)
+                          if attn_eq else None)
         lnVS_gl = jnp.log(VS_stat_gl) - log_V_ref
 
         with numpyro.plate("plate_freq_gl", n_freq, dim=-1):
@@ -603,7 +624,7 @@ def model_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                               subregion_id=subregion_id_gl, basin_id=basin_id_gl)
 
         median_gl, _ = calculate_median_training(
-            R=R_gl, Rx=Rx_gl, Ry0=Ry0_gl, F=F, R_scaled=R_scaled_gl, dist_cell=None,
+            R=R_gl, Rx=Rx_gl, Ry0=Ry0_gl, F=F, R_scaled=R_scaled_gl, R_scaled_eq=R_scaled_eq_gl, dist_cell=None,
             idx=idx_gl, evt_by_eq=ev_params_gl, site_by_stat=site_params_gl,
             coef=coef_gl, const=const, func_gs_scaling=func_gs_scaling,
             nl_model_dict=nl_model_dict,
@@ -659,7 +680,8 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                     calc_dWS=False, save_f_nl=False,
                     func_gs_scaling="stafford", estimate_gs_exp="fixed",
                     global_dict=None, calc_log_lik=False,
-                    sharing_config=None):
+                    sharing_config=None,
+                    estimate_Rb_attneq=False, Rb_attneq=0.0):
     """
     Same functional form as `model`, but every frequency-dependent
     coefficient (median-scaling and standard-deviation) is modeled
@@ -685,6 +707,19 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
       phi_s2s_gl, tau_attn_gl) were already per-frequency-independent in
       `model` -- unaffected here, same code.
 
+    estimate_Rb_attneq : bool, default False
+        True: the distance (in units of 100 km) from which the
+        event-specific distance slope `deltaB_attn` starts, `Rb_attneq`,
+        is estimated (Gamma prior, logistic hinge). Without such a break
+        the event-specific slope acts from R = 0 and the variance grows
+        unreasonably large with distance. Needs `attn_eq=True`.
+    Rb_attneq : float, default 0.0
+        Fixed break distance (units of 100 km) used when
+        `estimate_Rb_attneq=False` (sharp hinge via `jnp.where`); 0.0
+        reproduces the former behavior (slope from R = 0). Also used for
+        the global dataset. The mean attenuation (`c_attn`) is not
+        affected.
+
     Shared-vs-dataset-local routing (`sharing_config`) is unchanged --
     it's an orthogonal concern to spline vs. per-frequency-independent.
     """
@@ -701,6 +736,13 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
     Zt_eq_scaled = Zt_eq / 10.0
     R_scaled = R / 100.0
+    if estimate_Rb_attneq and not attn_eq:
+        raise ValueError("estimate_Rb_attneq=True needs attn_eq=True")
+    if attn_eq:
+        Rb_attneq = sample_Rb_attneq(estimate_Rb_attneq, Rb_attneq)
+        R_scaled_eq = attn_eq_distance(R_scaled, Rb_attneq, smooth=estimate_Rb_attneq)
+    else:
+        R_scaled_eq = None
 
     n_stat = X_stat.shape[0]
     n_eq = X_eq.shape[0]
@@ -933,7 +975,7 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     )
 
     median, f_nl = calculate_median_training(
-        R=R, Rx=Rx, Ry0=Ry0, F=F, R_scaled=R_scaled, dist_cell=dist_cell,
+        R=R, Rx=Rx, Ry0=Ry0, F=F, R_scaled=R_scaled, R_scaled_eq=R_scaled_eq, dist_cell=dist_cell,
         idx=idx, evt_by_eq=ev_params, site_by_stat=site_params,
         coef=coef_wus, const=const, func_gs_scaling=func_gs_scaling,
         nl_model_dict=nl_model_dict,
@@ -1017,6 +1059,8 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
         Zt_eq_scaled_gl = Zt_eq_gl / 10.0
         R_scaled_gl = R_gl / 100.0
+        R_scaled_eq_gl = (attn_eq_distance(R_scaled_gl, Rb_attneq, smooth=estimate_Rb_attneq)
+                          if attn_eq else None)
         lnVS_gl = jnp.log(VS_stat_gl) - log_V_ref
 
         with numpyro.plate("plate_freq_gl", n_freq, dim=-1):
@@ -1067,7 +1111,7 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                               subregion_id=subregion_id_gl, basin_id=basin_id_gl)
 
         median_gl, _ = calculate_median_training(
-            R=R_gl, Rx=Rx_gl, Ry0=Ry0_gl, F=F, R_scaled=R_scaled_gl, dist_cell=None,
+            R=R_gl, Rx=Rx_gl, Ry0=Ry0_gl, F=F, R_scaled=R_scaled_gl, R_scaled_eq=R_scaled_eq_gl, dist_cell=None,
             idx=idx_gl, evt_by_eq=ev_params_gl, site_by_stat=site_params_gl,
             coef=coef_gl, const=const, func_gs_scaling=func_gs_scaling,
             nl_model_dict=nl_model_dict,

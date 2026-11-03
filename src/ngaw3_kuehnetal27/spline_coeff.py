@@ -5,8 +5,43 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
+from patsy import dmatrix
+
+
+def make_spline_basis(F, spline_degree=3, spline_df=7):
+    """
+    B-spline basis in ln(frequency), shared by every model and guide that
+    models a coefficient as a smooth function of frequency
+    (`make_spline_coeff`, `make_spline_coeff_guide`).
+
+    `spline_df` equally spaced points between min and max of ln(F) are
+    generated and the end points are dropped twice, leaving
+    `spline_df - 4` interior knots. With `include_intercept=True` the
+    basis then has `spline_df - 4 + spline_degree + 1` columns, i.e.
+    `spline_df` for cubic splines. Model and guide must be given the same
+    F / spline_degree / spline_df so that both see the same basis.
+
+    Parameters
+    ----------
+    F : array_like, shape (n_freq,)
+        Frequencies (Hz), or 1/period for PSA models.
+    spline_degree : int
+    spline_df : int
+
+    Returns
+    -------
+    patsy DesignMatrix, shape (n_freq, n_basis) -- pass it as
+    `spline_basis` to `make_spline_coeff` / `make_spline_coeff_guide`.
+    """
+    ln_F = np.log(F)
+    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
+    return dmatrix(
+        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
+        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
+    )
 
 
 def make_spline_coeff(spline_basis, name, mu_loc=0, mu_scale=2,
@@ -18,9 +53,8 @@ def make_spline_coeff(spline_basis, name, mu_loc=0, mu_scale=2,
     Parameters
     ----------
     spline_basis : Array, shape (n_freq, n_spline_coefs)
-        Precomputed spline basis matrix (e.g. from `dmatrix(...)` in
-        model.py). Evaluate it against your frequency/log-frequency grid
-        before calling this function -- it's no longer computed here.
+        Precomputed spline basis matrix from `make_spline_basis`. It is
+        evaluated on the frequency grid beforehand, not inside this function.
     name : str
         Name of the coefficient; used to construct numpyro sample-site
         names (`mu_{name}`, `sigma_spline_{name}`, etc.) and the final

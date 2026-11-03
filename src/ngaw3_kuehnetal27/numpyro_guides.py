@@ -17,7 +17,7 @@ import numpy as np
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from patsy import dmatrix
+from ngaw3_kuehnetal27.spline_coeff import make_spline_basis
 
 from ngaw3_kuehnetal27.spline_coeff_guide import make_spline_coeff_guide
 from ngaw3_kuehnetal27.coefficient_sharing import DEFAULT_COEFFICIENT_SHARING
@@ -26,6 +26,7 @@ from ngaw3_kuehnetal27.coefficient_sharing_guide import (
     sample_c0_coefficient_guide,
     sample_cgs1_coefficient_guide,
     sample_coefficient_separate_guide,
+    sample_Rb_attneq_guide,
 )
 from ngaw3_kuehnetal27.median_core import ModelConstants
 
@@ -79,7 +80,8 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
               sharing_config=None, estimate_kappa=None,
               save_kappa_adj=True, save_ranef=True,
               estimate_cvs=True, amp1d_dict=None, prior_config=None,
-              include_region=True, zerosumnormal=False):
+              include_region=True, zerosumnormal=False,
+              estimate_Rb_attneq=False, Rb_attneq=0.0):
     """
     Guide for `model_eas`. `zerosumnormal` must match the value used in
     `model_eas`. With zerosumnormal=True the random-effect guide sites are
@@ -88,9 +90,15 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     shape (n_freq, n) (kappa: (n,)), i.e. the sample-site shape, which is
     transposed relative to the Normal guide's (n, n_freq); their scale_*
     params have shape (n_freq, n-1) (kappa: (n-1,)).
+    `estimate_Rb_attneq` must match the model; `Rb_attneq` (the fixed value
+    used when it is False) is accepted so that model and guide can be called
+    with the same keyword arguments, and is not used here.
     """
 
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
+
+    if attn_eq:
+        sample_Rb_attneq_guide(estimate_Rb_attneq)
 
     # ------------------------------------------------------------------
     # WUS data
@@ -102,11 +110,7 @@ def guide_eas(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     vs_measured_id = vs_meas_id.astype("int")
 
     ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     n_stat = X_stat.shape[0]
     n_eq = X_eq.shape[0]
@@ -418,7 +422,8 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                     calc_dWS=False, save_f_nl=False,
                     func_gs_scaling="stafford", estimate_gs_exp="fixed",
                     global_dict=None, calc_log_lik=False,
-                    sharing_config=None):
+                    sharing_config=None,
+                    estimate_Rb_attneq=False, Rb_attneq=0.0):
     """
     Guide for `model_separate`. Same site set as `guide`, except every
     coefficient that's per-frequency-independent in `model_separate`
@@ -430,8 +435,15 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     attn_Q / dist_cell / estimate_gs_break / estimate_zt_break /
     calc_nft / attn_eq / global_dict-is-None-or-not / func_gs_scaling /
     estimate_gs_exp) as `model_separate` in every SVI run.
+
+    `estimate_Rb_attneq` must match the model; `Rb_attneq` (the fixed value
+    used when it is False) is accepted so that model and guide can be called
+    with the same keyword arguments, and is not used here.
     """
     sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
+
+    if attn_eq:
+        sample_Rb_attneq_guide(estimate_Rb_attneq)
 
     R, Rjb, Rx, Ry0 = X_rec.T
     M_eq, Zt_eq, Fnm_eq, Frev_eq, FW_eq, Dip_eq, M_sd = X_eq.T

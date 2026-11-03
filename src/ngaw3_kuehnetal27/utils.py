@@ -30,6 +30,23 @@ def logistic_hinge(x: Array, c2: Array, c3: Array, x_break: Array, delta: Array 
     return c2 * (x - x_break) + (c3 - c2) * delta * jnp.logaddexp(0, (x - x_break) / delta)
 
 
+def attn_eq_distance(R_scaled: Array, Rb_attneq: Array = 0.0, smooth: bool = False,
+                     delta: float = 0.1) -> Array:
+    """
+    Distance variable (R / 100 km scale) that multiplies the event-specific
+    distance slope `deltaB_attn`: 0 below the break distance `Rb_attneq`
+    (same units as `R_scaled`), slope 1 above it.
+
+    smooth=False (Rb fixed): sharp hinge via `jnp.where`. With Rb_attneq=0
+        this is exactly `R_scaled`, i.e. the original behavior.
+    smooth=True (Rb estimated): logistic hinge with width `delta`, so the
+        value is differentiable with respect to `Rb_attneq`.
+    """
+    if smooth:
+        return logistic_hinge(R_scaled, 0.0, 1.0, Rb_attneq, delta)
+    return jnp.where(R_scaled > Rb_attneq, R_scaled - Rb_attneq, 0.0)
+
+
 def func_gs(R: Array, lnR: Array, c_gs1: Array, c_gs2: Array, gs_break: Array,
             delta_gs: Array, xi: Array) -> Array:
     """Geometric spreading, power-law hinge form."""

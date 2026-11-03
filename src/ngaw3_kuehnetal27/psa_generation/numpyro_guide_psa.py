@@ -23,7 +23,7 @@ import numpy as np
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from patsy import dmatrix
+from ngaw3_kuehnetal27.spline_coeff import make_spline_basis
 
 from ngaw3_kuehnetal27.spline_coeff_guide import make_spline_coeff_guide
 
@@ -54,11 +54,7 @@ def guide_psa(
     n_freq = len(F)
 
     ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     if estimate_gs_break:
         numpyro.sample("gs_break", dist.TransformedDistribution(

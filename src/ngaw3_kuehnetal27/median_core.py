@@ -164,6 +164,7 @@ def calculate_median_core(
     c_subregion_adj: Optional[Array] = None,  # (n_records, n_freq) or None
     kappa_adj: Optional[Array] = None,   # (n_records,) or None -- per-record kappa term (population + deviation, or deviation only)
     amp1d_adj: Optional[Array] = None,   # (n_records, n_freq) or None -- precomputed 1D site amplification (log scale), already resolved to per-record shape. WUS-only in practice; added on top of coef.c_vs, not in place of it.
+    R_scaled_eq: Optional[Array] = None,  # (n_records,) or None -- distance variable for the event-specific slope (see utils.attn_eq_distance); None -> R_scaled
 ) -> Tuple[Array, Array]:
     """
     Compute ln(median) for a set of records within one dataset.
@@ -284,7 +285,8 @@ def calculate_median_core(
         median = median - coef.c_attn * R_scaled[:, jnp.newaxis]
 
     # --- event-specific distance slope (zero unless deltaB_attn passed) ---
-    median = median + deltaB_attn * R_scaled[:, jnp.newaxis]
+    R_eq = R_scaled if R_scaled_eq is None else R_scaled_eq
+    median = median + deltaB_attn * R_eq[:, jnp.newaxis]
 
     # --- nonlinear site amplification ---
     if nl_model_dict is None:
@@ -332,6 +334,7 @@ def calculate_median_training(
     c_basin: Array,         # (n_basin, n_freq)
     c_subregion: Array,     # (n_subregion, n_freq) -- zeros(1, n_freq) for global
     kappa_adj: Optional[Array] = None,   # (n_rec,), already resolved in the numpyro model
+    R_scaled_eq: Optional[Array] = None,  # (n_records,) -- distance variable for the event-specific slope (utils.attn_eq_distance); None -> R_scaled
     amp1d_dict: Optional[dict] = None,   # {'log_amp': (n_stat, n_freq)} or None -- precomputed per-station site amplification; gathered by stat_id here, then added on top of the usual vs30 scaling. WUS-only in practice -- omit (or pass None) for global.
 ) -> Tuple[Array, Array]:
     """
@@ -376,6 +379,7 @@ def calculate_median_training(
         c_subregion_adj=c_subregion[idx.subregion_id],
         kappa_adj=kappa_adj,
         amp1d_adj=amp1d_adj,
+        R_scaled_eq=R_scaled_eq,
     )
 
 

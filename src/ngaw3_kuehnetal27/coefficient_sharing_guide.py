@@ -18,8 +18,9 @@ these produces a different set of sample sites and numpyro will error
 """
 from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable, Dict, Tuple
 
+import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 
@@ -197,3 +198,17 @@ def sample_coefficient_separate_guide(
     resolve_shared_coefficient_guide(
         base_name, make_guide_sample, sharing_config[base_name], gl_suffix=gl_suffix,
     )
+
+
+def sample_Rb_attneq_guide(estimate: bool, prior: Tuple[float, float] = (14.1, 18.0)):
+    """
+    Guide counterpart to `sample_Rb_attneq` (point mass, initialized at the
+    prior mean, in the units of the model: 100 km). Does nothing if
+    `estimate` is False (Rb_attneq is then a fixed argument of model and
+    guide).
+    """
+    if estimate:
+        numpyro.sample("Rb_attneq", dist.TransformedDistribution(
+            dist.Delta(v=numpyro.param("loc_log_Rb_attneq", jnp.log(prior[0] / prior[1]))),
+            transforms=dist.transforms.ExpTransform(),
+        ))

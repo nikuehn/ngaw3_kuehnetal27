@@ -33,9 +33,8 @@ import numpy as np
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from patsy import dmatrix
 
-from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
+from ngaw3_kuehnetal27.spline_coeff import make_spline_basis, make_spline_coeff
 from ngaw3_kuehnetal27.median_core import Coefficients, ModelConstants
 from ngaw3_kuehnetal27.utils import (
     insert_zero_row,
@@ -105,11 +104,7 @@ def model_psa(
     n_freq = len(F)
 
     ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    spline_basis = dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     const = ModelConstants()
 

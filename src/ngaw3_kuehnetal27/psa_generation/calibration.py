@@ -75,20 +75,21 @@ import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 import pandas as pd
-from patsy import dmatrix
 
 from ngaw3_kuehnetal27.model_inputs import unpack_model_inputs
-from ngaw3_kuehnetal27.spline_coeff import make_spline_coeff
+from ngaw3_kuehnetal27.spline_coeff import make_spline_basis, make_spline_coeff
 from ngaw3_kuehnetal27.spline_coeff_guide import make_spline_coeff_guide
 from ngaw3_kuehnetal27.numpyro_guides import _zsn_guide_dist
 from ngaw3_kuehnetal27.median_core import (
     Coefficients, EventParams, ModelConstants, SiteParams, predict_median,
 )
 from ngaw3_kuehnetal27.utils import (
-        smooth_trilinear_ramp_repar,
-        calculate_hw_scaling,
-        logistic_hinge
+    smooth_trilinear_ramp_repar,
+    calculate_hw_scaling,
+    attn_eq_distance,
 )
+from ngaw3_kuehnetal27.coefficient_sharing import sample_Rb_attneq
+from ngaw3_kuehnetal27.coefficient_sharing_guide import sample_Rb_attneq_guide
 from ngaw3_kuehnetal27.site_amplification.nl_models import (
     compute_ln_amplification_hashash_new,
     compute_ln_amplification_mahdi,
@@ -97,15 +98,6 @@ from ngaw3_kuehnetal27.psa_generation.median_psa import resolve_vs_coefficient
 from ngaw3_kuehnetal27.psa_generation.nn_psa_model import predict as predict_nn
 
 Array = jnp.ndarray
-
-
-def _spline_basis(F, spline_degree, spline_df):
-    ln_F = np.log(F)
-    knot_list = np.linspace(np.min(ln_F), np.max(ln_F), spline_df)[1:-1]
-    return dmatrix(
-        "bs(x, knots=knots, degree=degree, include_intercept=True) - 1",
-        {"x": ln_F, "knots": knot_list[1:-1], "degree": spline_degree},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +237,7 @@ def model_psa_calibration(
     spline_degree=3, spline_df=7,
     calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
     L_freq=None, zerosumnormal=False,
-    estimate_Rb_attneq = False,
+    estimate_Rb_attneq=False, Rb_attneq=0.0,
 ):
     """
     Parameters
@@ -273,6 +265,14 @@ def model_psa_calibration(
         the regional variation is then already in `median_ref`. Use True
         when it does not and the observed data should determine it (also
         see the module docstring).
+    estimate_Rb_attneq : bool, default False
+        Estimate the distance (units of 100 km) from which the event-specific
+        distance slope (`deltaB_attn`) starts, `Rb_attneq` (Gamma prior,
+        logistic hinge). Needs `attn_eq=True`. Same flag/prior as in
+        `model_eas`.
+    Rb_attneq : float, default 0.0
+        Fixed break distance used when `estimate_Rb_attneq=False` (sharp
+        hinge via `jnp.where`); 0.0 means the slope acts from R = 0.
     include_hw : bool, default False
         Estimate a hanging-wall term (c_hw) here. Use False when the
         sampling and the PSA model already include hanging-wall scaling;
@@ -295,17 +295,18 @@ def model_psa_calibration(
     vs_measured_id = inp.vs_measured_id
     n_freq = len(F)
 
-    spline_basis = _spline_basis(F, spline_degree, spline_df)
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     const = ModelConstants()
     mu_freq = jnp.zeros(n_freq)
     L_freq = L_freq if L_freq is not None else jnp.eye(n_freq)
 
-    if estimate_Rb_attneq:
-        Rb_attneq = numpyro.sample("Rb_attneq", dist.Gamma(14.1, 18))
-    else:
-        Rb_attneq = 0
-    R_scaled = logistic_hinge(inp.R / 100, 0.0, 1.0, Rb_attneq, delta= 0.1)
+    # distance variable of the event-specific slope (only used with attn_eq)
+    if estimate_Rb_attneq and not attn_eq:
+        raise ValueError("estimate_Rb_attneq=True needs attn_eq=True")
+    if attn_eq:
+        Rb_attneq = sample_Rb_attneq(estimate_Rb_attneq, Rb_attneq)
+        R_scaled_eq = attn_eq_distance(inp.R / 100.0, Rb_attneq, smooth=estimate_Rb_attneq)
 
     c_add = make_spline_coeff(spline_basis, "c_add", mu_loc=0.0, mu_scale=5.0)
     if include_hw:
@@ -413,7 +414,7 @@ def model_psa_calibration(
     if include_region:
         median_before_nl = median_before_nl + c_subregion[subregion_id]
     if attn_eq:
-        median_before_nl = median_before_nl + deltaB_attn[eq_id] * R_scaled[:, jnp.newaxis]
+        median_before_nl = median_before_nl + deltaB_attn[eq_id] * R_scaled_eq[:, jnp.newaxis]
 
     VS_stat_rec = inp.VS_stat[stat_id]
     f_nl = _resolve_f_nl(median_before_nl, VS_stat_rec, M_rec, nl_model_dict)
@@ -457,24 +458,22 @@ def guide_psa_calibration(
     spline_degree=3, spline_df=7,
     calc_dWS=False, save_f_nl=False, calc_log_lik=False, save_ranef=True,
     L_freq=None, zerosumnormal=False,
-    estimate_Rb_attneq = False,
+    estimate_Rb_attneq=False, Rb_attneq=0.0,
 ):
     """Guide for `model_psa_calibration` -- same arguments, same rules
-    (must match the model's attn_eq/include_region/include_hw/zerosumnormal
-    on every call). Site and param names follow `guide_eas`
+    (must match the model's attn_eq/include_region/include_hw/zerosumnormal/
+    estimate_Rb_attneq on every call; `Rb_attneq` is only accepted so both can
+    be called with the same keyword arguments). Site and param names follow `guide_eas`
     (loc_/scale_ of the *_raw sites)."""
     n_eq = np.asarray(X_eq).shape[0]
     n_stat = np.asarray(X_stat).shape[0]
     n_subregion = int(np.max(np.asarray(X_id)[:, 2])) + 1
     n_freq = len(F)
 
-    if estimate_Rb_attneq:
-        numpyro.sample("Rb_attneq", dist.TransformedDistribution(
-            dist.Delta(v=numpyro.param("loc_log_Rb_attneq", 4.0)),
-            transforms=dist.transforms.ExpTransform(),
-        ))
+    if attn_eq:
+        sample_Rb_attneq_guide(estimate_Rb_attneq)
 
-    spline_basis = _spline_basis(F, spline_degree, spline_df)
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
 
     make_spline_coeff_guide(spline_basis, "c_add", monotonic=None, init_mu=0.0)
     if include_hw:

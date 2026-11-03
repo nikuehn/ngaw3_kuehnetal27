@@ -421,3 +421,19 @@ def sample_coefficient_separate(
     return resolve_shared_coefficient(
         base_name, make_sample, sharing_config[base_name], gl_suffix=gl_suffix,
     )
+
+
+def sample_Rb_attneq(estimate: bool, Rb_fixed: float = 0.0, prior: Tuple[float, float] = (14.1, 18.0)):
+    """
+    Break distance `Rb_attneq` (in units of 100 km) from which the
+    event-specific distance slope `deltaB_attn` starts; see
+    `utils.attn_eq_distance`. Without it the slope acts from R = 0 and the
+    total variance grows unreasonably large with distance.
+
+    estimate=True : sampled with a Gamma(*prior) prior (default mean 0.78,
+        i.e. about 78 km).
+    estimate=False: the fixed value `Rb_fixed` is returned, nothing is sampled.
+    """
+    if estimate:
+        return numpyro.sample("Rb_attneq", dist.Gamma(*prior))
+    return Rb_fixed
