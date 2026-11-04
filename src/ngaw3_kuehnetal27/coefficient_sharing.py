@@ -432,8 +432,11 @@ def sample_Rb_attneq(estimate: bool, Rb_fixed: float = 0.0, prior: Tuple[float, 
 
     estimate=True : sampled with a Gamma(*prior) prior (default mean 0.78,
         i.e. about 78 km).
-    estimate=False: the fixed value `Rb_fixed` is returned, nothing is sampled.
+    estimate=False: the fixed value `Rb_fixed` is returned and recorded as a
+        deterministic site "Rb_attneq", so that the value used shows up in the
+        results / summary_stats either way (e.g. for
+        `variability.calculate_variance`).
     """
     if estimate:
         return numpyro.sample("Rb_attneq", dist.Gamma(*prior))
-    return Rb_fixed
+    return numpyro.deterministic("Rb_attneq", jnp.asarray(Rb_fixed, dtype=float))
