@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 import jax.numpy as jnp
 
-from ngaw3_kuehnetal27.utils import smooth_trilinear_ramp_repar
+from ngaw3_kuehnetal27.utils import attn_eq_distance, smooth_trilinear_ramp_repar
 
 Array = jnp.ndarray
 
@@ -27,6 +27,7 @@ def calculate_variance(
     vsmeas_id: Array,
     summary_stats: Dict[str, Any],
     single_site: bool = False,
+    smooth_attn_eq: bool = False,
 ) -> Array:
     """
     Total variance (tau^2 + phi_ss^2 + attenuation-related tau_attn
@@ -46,12 +47,21 @@ def calculate_variance(
         elsewhere -- `summary_stats` is just this function's name for
         it). Must contain, each shape (n_freq,): tau_0, tau_1,
         phi_ss_0, phi_ss_1, tau_attn, and (unless `single_site`)
-        phi_s2s_meas, phi_s2s_est.
+        phi_s2s_meas, phi_s2s_est. Optional: Rb_attneq, the distance (in
+        units of 100 km, as in the model) from which the event-specific
+        slope starts; if absent it is taken as 0 (slope from R = 0, as
+        in results from before `Rb_attneq` existed).
     single_site : bool, default False
         If True, excludes phi_s2s (site-to-site variability) from the
         total -- i.e. the variance of ground motion at a single,
         already-known site, rather than the full population variance
         across sites. If False (default), phi_s2s is included.
+    smooth_attn_eq : bool, default False
+        How the distance variable of the tau_attn term is formed from
+        `Rb_attneq`: False = sharp hinge max(R/100 - Rb, 0), matching a
+        fixed `Rb_attneq`; True = the logistic hinge used when `Rb_attneq`
+        was estimated. The two differ by at most 0.07 (in R/100) at the
+        break and by less than 0.005 beyond Rb + 0.3.
 
     Returns
     -------
@@ -62,8 +72,9 @@ def calculate_variance(
     -----
     tau and phi_ss are magnitude-dependent via `smooth_trilinear_ramp_
     repar`, breakpoints at M 5.3/6.7 (delta=0.2) -- matching the fitting
-    model's own parameterization. tau_attn scales with rrup/100 (an
-    attenuation-related between-event term, not magnitude-dependent).
+    model's own parameterization. tau_attn scales with
+    max(rrup/100 - Rb_attneq, 0) (an attenuation-related between-event
+    term, not magnitude-dependent), see `utils.attn_eq_distance`.
     phi_s2s does not depend on magnitude or distance, only site
     (measured vs. estimated Vs30).
     """
@@ -81,10 +92,13 @@ def calculate_variance(
         MB1, MB2, delta=DELTA,
     ))
 
+    Rb_attneq = summary_stats.get("Rb_attneq", 0.0)
+    R_eq = attn_eq_distance(rrups / 100.0, Rb_attneq, smooth=smooth_attn_eq)
+
     var = (
         tau ** 2
         + phi_ss ** 2
-        + summary_stats["tau_attn"] ** 2 * (rrups[:, jnp.newaxis] / 100) ** 2
+        + summary_stats["tau_attn"] ** 2 * R_eq[:, jnp.newaxis] ** 2
     )
 
     if not single_site:
