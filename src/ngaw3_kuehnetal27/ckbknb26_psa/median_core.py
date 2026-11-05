@@ -4,10 +4,9 @@ Median PSA computation for the NGA-West3 CKBKNB26 GMM, ported from
 
 Scope of this port
 -------------------
-Only the **median** ground motion is implemented (matching the "mainly
-interested in the median predictions" use case) -- the standard-deviation
-machinery (Tau/Phi/GenSigmoid) and the lowess spectral smoothing in the R
-function are not ported.
+The **median** ground motion is implemented here. The standard deviations
+(Tau/Phi/GenSigmoid, plus the nonlinear adjustment) are in `sigma_core.py`.
+The lowess spectral smoothing in the R function is not ported.
 
 **Nonlinear soil amplification** is implemented for the Ilhan et al.
 (2026) model (`nonlinear_site.py`, ported from `ILHAN26.R`) -- pass
@@ -78,6 +77,9 @@ _COEF_FIELDS = [
     "d1", "d2",
     "z1", "z2", "z3", "z4", "z5", "z6",
     "h1", "h2", "h3", "h4", "h5", "h6",
+    # standard-deviation coefficients (used by sigma_core.py)
+    "Phi_ss_M53", "Phi_ss_M67", "Tau_0_M53", "Tau_0_M67",
+    "Phi_s2s_meas", "Phi_s2s_prxy", "Tau_r", "Phi_lin",
 ]
 
 
@@ -124,6 +126,14 @@ class Coefficients(NamedTuple):
     h4: jnp.ndarray
     h5: jnp.ndarray
     h6: jnp.ndarray
+    Phi_ss_M53: jnp.ndarray
+    Phi_ss_M67: jnp.ndarray
+    Tau_0_M53: jnp.ndarray
+    Tau_0_M67: jnp.ndarray
+    Phi_s2s_meas: jnp.ndarray
+    Phi_s2s_prxy: jnp.ndarray
+    Tau_r: jnp.ndarray
+    Phi_lin: jnp.ndarray
 
 
 def _select_periods(df: pd.DataFrame, periods: Sequence[float], rtol: float = 1e-6, atol: float = 1e-9) -> pd.DataFrame:
@@ -307,6 +317,66 @@ def _site_and_rock_sediment_terms(c, Vs30_, Z25_):
     return fsed, fsed_rock
 
 
+class _Scenario(NamedTuple):
+    """Broadcast, geometry-filled scenario inputs, each a ``(n, 1)`` column vector."""
+    M: jnp.ndarray
+    Rrup: jnp.ndarray
+    Rjb: jnp.ndarray
+    Rx: jnp.ndarray
+    Frv: jnp.ndarray
+    Fnm: jnp.ndarray
+    W: jnp.ndarray
+    Dip: jnp.ndarray
+    Ztor: jnp.ndarray
+    Zhyp: jnp.ndarray
+    Vs30: jnp.ndarray
+    Vs30_meas: jnp.ndarray
+    Z25: jnp.ndarray
+    HW: jnp.ndarray
+
+
+def _prepare_scenario(M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
+                      Vs30, Vs30_meas, Z25, HW) -> _Scenario:
+    """
+    Broadcast all scenario inputs to a common ``(n,)`` shape, back-fill the
+    NaN geometry fields (`_fill_geometry`) and return them as ``(n, 1)``
+    column vectors, so that every term against the ``(n_periods,)``
+    coefficients comes out ``(n, n_periods)``. Shared by the median and the
+    standard-deviation calculations.
+    """
+    (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
+     Vs30, Vs30_meas, Z25, HW) = jnp.broadcast_arrays(*[
+        jnp.atleast_1d(jnp.asarray(x, dtype=jnp.float64)) for x in
+        (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot, Vs30, Vs30_meas, Z25, HW)
+    ])
+
+    Ztor, W, Zbot, Zhyp, Rjb, Rx = _fill_geometry(M, Rrup, Frv, Dip, W, Ztor, Zhyp, Zbot, HW, Rjb, Rx)
+
+    col = lambda x: x[:, None]  # noqa: E731
+    return _Scenario(*(
+        col(v) for v in (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Vs30, Vs30_meas, Z25, HW)
+    ))
+
+
+def _rock_psa(coef: Coefficients, sc: _Scenario) -> jnp.ndarray:
+    """Rock-reference (Vs30 = 800 m/s) median PSA in g, shape (n, n_periods) (R: `PSAr.T`)."""
+    f_base = _base_terms(coef, sc.M, sc.Rrup, sc.Rjb, sc.Rx, sc.Frv, sc.Fnm, sc.W, sc.Dip,
+                         sc.Ztor, sc.Zhyp, sc.HW)
+    _, fsed_rock = _site_and_rock_sediment_terms(coef, sc.Vs30, sc.Z25)
+    return jnp.exp(f_base + fsed_rock)
+
+
+def _check_same_periods(coef: Coefficients, other, name: str) -> None:
+    """Raise unless `other` (e.g. `nl_coef`) covers the same periods as `coef`, in the same order."""
+    if other.Per.shape != coef.Per.shape or not np.allclose(
+        np.asarray(other.Per), np.asarray(coef.Per)
+    ):
+        raise ValueError(
+            f"{name} and coef cover different periods -- load both with the "
+            "same `periods` argument so they line up period-for-period."
+        )
+
+
 def calculate_ln_median_psa_campbelletal27(
     coef: Coefficients,
     M,
@@ -367,44 +437,29 @@ def calculate_ln_median_psa_campbelletal27(
     -------
     jnp.ndarray, shape (n, n_periods)
     """
-    (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
-     Vs30, Vs30_meas, Z25, HW) = jnp.broadcast_arrays(*[
-        jnp.atleast_1d(jnp.asarray(x, dtype=jnp.float64)) for x in
-        (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot, Vs30, Vs30_meas, Z25, HW)
-    ])
-
-    Ztor, W, Zbot, Zhyp, Rjb, Rx = _fill_geometry(M, Rrup, Frv, Dip, W, Ztor, Zhyp, Zbot, HW, Rjb, Rx)
-
     # scenario (n,) -> (n, 1) column vectors; coefficients (n_periods,)
     # broadcast as (1, n_periods) row vectors -> every term below is (n, n_periods)
-    col = lambda x: x[:, None]  # noqa: E731
-    M_, Rrup_, Rjb_, Rx_, Frv_, Fnm_, W_, Dip_, Ztor_, Zhyp_, Vs30_, Z25_, HW_ = (
-        col(v) for v in (M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Vs30, Z25, HW)
-    )
+    sc = _prepare_scenario(M, Rrup, Rjb, Rx, Frv, Fnm, W, Dip, Ztor, Zhyp, Zbot,
+                           Vs30, Vs30_meas, Z25, HW)
 
-    f_base = _base_terms(coef, M_, Rrup_, Rjb_, Rx_, Frv_, Fnm_, W_, Dip_, Ztor_, Zhyp_, HW_)
-    fsed, fsed_rock = _site_and_rock_sediment_terms(coef, Vs30_, Z25_)
+    f_base = _base_terms(coef, sc.M, sc.Rrup, sc.Rjb, sc.Rx, sc.Frv, sc.Fnm, sc.W, sc.Dip,
+                         sc.Ztor, sc.Zhyp, sc.HW)
+    fsed, fsed_rock = _site_and_rock_sediment_terms(coef, sc.Vs30, sc.Z25)
 
     # Linear shallow-site-response term
-    Vs30_clipped = jnp.clip(Vs30_, coef.v1, coef.v2)
+    Vs30_clipped = jnp.clip(sc.Vs30, coef.v1, coef.v2)
     flin = coef.c14 * jnp.log(Vs30_clipped / coef.v0)
 
     if nl_coef is None:
         return f_base + flin + fsed
 
-    if nl_coef.Per.shape != coef.Per.shape or not np.allclose(
-        np.asarray(nl_coef.Per), np.asarray(coef.Per)
-    ):
-        raise ValueError(
-            "nl_coef and coef cover different periods -- load both with the "
-            "same `periods` argument so they line up period-for-period."
-        )
+    _check_same_periods(coef, nl_coef, "nl_coef")
 
     # Rock-reference (Vs30 = 800 m/s) median PSA, needed to drive the
     # nonlinear model (R: PSAr.T), capped at IR_CAP (1 g) per Ilhan et al. (2026).
     PSAr = jnp.exp(f_base + fsed_rock)
     ir = jnp.minimum(PSAr, IR_CAP)
-    fnln = compute_ln_nonlinearity_ilhan26(Vs30_, ir, nl_coef)
+    fnln = compute_ln_nonlinearity_ilhan26(sc.Vs30, ir, nl_coef)
 
     return f_base + flin + fnln + fsed
 

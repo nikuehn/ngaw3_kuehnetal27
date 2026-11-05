@@ -24,10 +24,19 @@ which also means no separate rock-reference PGA prediction is needed.)
 `median_core.calculate_ln_median_psa_campbelletal27` applies the cap
 before calling `compute_ln_nonlinearity_ilhan26`.
 
-Median only: the standard-deviation half of `ILHAN26.R` (`sig_c`, `sig_f`,
-`V1`, `V2`, and the `Alpha` derivative used to propagate nonlinearity into
-sigma) is not ported. `load_ilhan26_coefficients` therefore only reads
-`ILHAN26_Coeffs.csv`, not `ILHAN26_StdDevs.csv`.
+Besides the median term (`compute_ln_nonlinearity_ilhan26`) this module has
+the two pieces `ILHAN26.R` hands to the total-sigma calculation:
+
+* `compute_alpha_ilhan26` -- `Alpha`, the derivative of the nonlinear term
+  with respect to ln(rock motion), which rescales the linear standard
+  deviations by ``(1 + Alpha)``.
+* `compute_sig_fnln_ilhan26` -- `sig_fnln`, the standard deviation of the
+  nonlinear amplification itself (includes epistemic uncertainty), read from
+  `ILHAN26_StdDevs.csv` via `load_ilhan26_std_coefficients`.
+
+Both take the same capped reference intensity `Ir = min(PSAr, 1 g)` as the
+median term. How they are combined with the linear model's standard
+deviations is in `sigma_core.calculate_sigma_campbelletal27`.
 """
 from __future__ import annotations
 
@@ -40,7 +49,11 @@ import pandas as pd
 __all__ = [
     "Ilhan26Coefficients",
     "load_ilhan26_coefficients",
+    "Ilhan26StdCoefficients",
+    "load_ilhan26_std_coefficients",
     "compute_ln_nonlinearity_ilhan26",
+    "compute_alpha_ilhan26",
+    "compute_sig_fnln_ilhan26",
 ]
 
 V_REF = 800.0             # Reference (rock) Vs30, m/s -- matches v0 in the median-model coefficients
@@ -49,6 +62,7 @@ FREQ_TAPER_CENTER = 4.998  # Hz, center of cosine taper for the frequency weight
 IR_CAP = 1.0              # g -- Ilhan26's cap on the rock-reference PSA
 
 _ILHAN26_FIELDS = ["Per", "f3", "f4", "f5", "Vf", "Vg"]
+_ILHAN26_STD_FIELDS = ["Per", "sig_c", "sig_f", "V1", "V2"]
 
 
 class Ilhan26Coefficients(NamedTuple):
@@ -59,6 +73,15 @@ class Ilhan26Coefficients(NamedTuple):
     f5: jnp.ndarray
     Vf: jnp.ndarray
     Vg: jnp.ndarray
+
+
+class Ilhan26StdCoefficients(NamedTuple):
+    """Standard-deviation parameters, one JAX array per field, shape ``(n_periods,)``."""
+    Per: jnp.ndarray
+    sig_c: jnp.ndarray
+    sig_f: jnp.ndarray
+    V1: jnp.ndarray
+    V2: jnp.ndarray
 
 
 def _select_periods(df: pd.DataFrame, periods: Sequence[float], rtol: float = 1e-6, atol: float = 1e-9) -> pd.DataFrame:
@@ -113,6 +136,57 @@ def load_ilhan26_coefficients(
     })
 
 
+def load_ilhan26_std_coefficients(
+    csv_path: str, periods: Optional[Sequence[float]] = None
+) -> Ilhan26StdCoefficients:
+    """
+    Load `Ilhan26StdCoefficients` from `ILHAN26_StdDevs.csv` (columns
+    `Per, sig_c, sig_f, V1, V2`).
+
+    `periods` works exactly as in `load_ilhan26_coefficients` -- pass the
+    same list used for the median model's `Coefficients` so everything
+    lines up period-for-period.
+
+    Raises
+    ------
+    ValueError
+        If any requested period has no match (within tolerance) in the file.
+    """
+    df = pd.read_csv(csv_path)
+    if periods is not None:
+        df = _select_periods(df, periods)
+    return Ilhan26StdCoefficients(**{
+        field: jnp.asarray(df[field].values, dtype=jnp.float64) for field in _ILHAN26_STD_FIELDS
+    })
+
+
+def _f2_and_delta_f2(vs30, c):
+    """`f2` and `delta_f2` of `ILHAN26.R` (shared by the median term and Alpha)."""
+    vs30_lim = jnp.clip(vs30, 200.0, V_REF)
+    tem_nl = jnp.clip((V_REF - vs30_lim) / (V_REF - c.Vg), 0.0, 1.0)
+
+    f2 = c.f4 * (jnp.exp(c.f5 * (vs30_lim - V_REF2)) - jnp.exp(c.f5 * (V_REF - V_REF2)))
+    delta_f2 = c.f4 * (
+        jnp.exp(c.f5 * (vs30_lim - V_REF2)) - jnp.exp(c.f5 * (c.Vf - V_REF2))
+    ) * tem_nl
+    return f2, delta_f2
+
+
+def _frequency_weights(per):
+    """
+    Clipped cosine frequency taper `wf` of `ILHAN26.R`: 1 below `f_a`, 0
+    above `f_b`, cosine transition in between. Used by both the median term
+    and `Alpha`.
+    """
+    freq = 1.0 / per
+    f_a = 0.9 * FREQ_TAPER_CENTER
+    f_b = 1.1 * FREQ_TAPER_CENTER
+    w_cos = 0.5 * (1.0 + jnp.cos(
+        jnp.pi * (jnp.log(freq) - jnp.log(f_a)) / (jnp.log(f_b) - jnp.log(f_a))
+    ))
+    return jnp.where(freq <= f_a, 1.0, jnp.where(freq >= f_b, 0.0, w_cos))
+
+
 def compute_ln_nonlinearity_ilhan26(
     vs30: jnp.ndarray, ir: jnp.ndarray, nl_coef: Ilhan26Coefficients
 ) -> jnp.ndarray:
@@ -141,20 +215,61 @@ def compute_ln_nonlinearity_ilhan26(
     jnp.ndarray, shape (n, n_periods)
     """
     c = nl_coef
-    vs30_lim = jnp.clip(vs30, 200.0, V_REF)
-    tem_nl = jnp.clip((V_REF - vs30_lim) / (V_REF - c.Vg), 0.0, 1.0)
+    f2, delta_f2 = _f2_and_delta_f2(vs30, c)
+    wf = _frequency_weights(c.Per)
 
-    f2 = c.f4 * (jnp.exp(c.f5 * (vs30_lim - V_REF2)) - jnp.exp(c.f5 * (V_REF - V_REF2)))
-    delta_f2 = c.f4 * (
-        jnp.exp(c.f5 * (vs30_lim - V_REF2)) - jnp.exp(c.f5 * (c.Vf - V_REF2))
-    ) * tem_nl
+    return (f2 + delta_f2 * wf) * jnp.log((ir + c.f3) / c.f3)
 
-    freq = 1.0 / c.Per
-    f_a = 0.9 * FREQ_TAPER_CENTER
-    f_b = 1.1 * FREQ_TAPER_CENTER
-    w_f_cos = 0.5 * (1.0 + jnp.cos(
-        jnp.pi * (jnp.log(freq) - jnp.log(f_a)) / (jnp.log(f_b) - jnp.log(f_a))
-    ))
-    w_f = jnp.where(freq <= f_a, 1.0, jnp.where(freq >= f_b, 0.0, w_f_cos))
 
-    return (f2 + delta_f2 * w_f) * jnp.log((ir + c.f3) / c.f3)
+def compute_alpha_ilhan26(
+    vs30: jnp.ndarray, ir: jnp.ndarray, nl_coef: Ilhan26Coefficients
+) -> jnp.ndarray:
+    """
+    `Alpha` of `ILHAN26.R`: derivative of the nonlinear term `fnln` with
+    respect to ln(PSAr), evaluated at the (capped) reference intensity
+    `ir`. The linear standard deviations are scaled by ``(1 + Alpha)`` in
+    the nonlinear total sigma.
+
+    Parameters are as for `compute_ln_nonlinearity_ilhan26`.
+
+    This is the exact derivative of `compute_ln_nonlinearity_ilhan26`:
+    ``Alpha = (f2 + df2*wf) * Ir/(Ir + f3)``, with the same clipped taper
+    weight `wf` as the median term. (`ILHAN26.R` has the raw cosine weight
+    `Wf` here instead, which looks like a typo -- it only coincides with
+    `wf` inside the taper band -- so this deliberately differs from the R
+    file; the model developers have been notified.)
+    """
+    c = nl_coef
+    f2, delta_f2 = _f2_and_delta_f2(vs30, c)
+    wf = _frequency_weights(c.Per)
+
+    return (f2 + delta_f2 * wf) * ir / (ir + c.f3)
+
+
+def compute_sig_fnln_ilhan26(
+    vs30: jnp.ndarray, ir: jnp.ndarray, std_coef: Ilhan26StdCoefficients
+) -> jnp.ndarray:
+    """
+    `sig_fnln` of `ILHAN26.R`: standard deviation of the nonlinear
+    amplification (includes epistemic uncertainty). Called `Phi_nln` in the
+    total-sigma calculation.
+
+    Parameters
+    ----------
+    vs30 : jnp.ndarray, shape (n, 1)
+        Site Vs30 (m/s), as a column vector.
+    ir : jnp.ndarray, shape (n, n_periods)
+        Capped reference intensity (g), ``jnp.minimum(PSAr, IR_CAP)``.
+    std_coef : Ilhan26StdCoefficients, fields shape (n_periods,)
+        From `load_ilhan26_std_coefficients`, same periods/order as the
+        median model's `Coefficients`.
+
+    Returns
+    -------
+    jnp.ndarray, shape (n, n_periods)
+    """
+    c = std_coef
+    sig_f2_mid = (-c.sig_c / jnp.log(c.V2 / c.V1)) * jnp.log(vs30 / c.V1) + c.sig_c
+    sig_f2 = jnp.where(vs30 < c.V1, c.sig_c, jnp.where(vs30 > c.V2, 0.0, sig_f2_mid))
+
+    return sig_f2 * jnp.log((ir + c.sig_f) / c.sig_f)
