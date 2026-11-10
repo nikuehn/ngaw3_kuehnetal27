@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import List, Sequence, Tuple
 
+import zipfile
 import numpy as np
 import pandas as pd
 
@@ -74,7 +75,7 @@ def load_psa_data(
     Parameters
     ----------
     psa_flatfile_path : str or Path
-        Full path to the NGA West3 PSA RotD50 flatfile CSV.
+        Full path to the NGA West3 PSA RotD50 flatfile CSV.zip.
     motion_ids : array-like of int
         Motion IDs to select (e.g. `data_used['motion_id']` from
         `prepare_data`). Must be unique. The output rows follow this
@@ -105,7 +106,7 @@ def load_psa_data(
     if pd.Series(motion_ids).duplicated().any():
         raise ValueError("motion_ids contains duplicates.")
 
-    data_psa = pd.read_csv(psa_flatfile_path)
+    data_psa = pd.read_csv(psa_flatfile_path, compression='zip')
 
     names_all = [col for col in data_psa.columns if col.startswith('psa_rotd50')]
     periods_all = [convert_column_name_to_period(col) for col in names_all]

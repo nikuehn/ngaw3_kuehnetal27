@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from typing import List, Optional, Sequence, Tuple
 
+import zipfile
 import numpy as np
 import pandas as pd
 
@@ -62,9 +63,9 @@ def load_data(
     Parameters
     ----------
     eas_flatfile_path : str or Path
-        Full path to the NGA West3 EAS flatfile CSV. Not shipped with
-        the package (too large) -- point this at wherever you keep it
-        locally.
+        Full path to the NGA West3 EAS flatfile CSV.zip (must be zipped).
+        Not shipped with the package (too large) -- point this at wherever
+        you keep it locally.
     site_labels_path : str or Path, optional
         Full path to the site labels CSV (basin/region/bouguer).
         Defaults to the copy shipped with the package
@@ -96,7 +97,7 @@ def load_data(
     if site_labels_path is None:
         site_labels_path = package_data_path("site_data_assigned_nov26.csv")
 
-    data_ngaw3 = pd.read_csv(eas_flatfile_path)
+    data_ngaw3 = pd.read_csv(eas_flatfile_path, compression='zip')
     site_labels = pd.read_csv(site_labels_path)
     site_region_unknown = 0
 
