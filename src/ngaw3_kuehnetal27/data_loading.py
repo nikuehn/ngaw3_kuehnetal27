@@ -95,7 +95,7 @@ def load_data(
     frequencies_used : list[float]
     """
     if site_labels_path is None:
-        site_labels_path = package_data_path("site_data_assigned_nov26.csv")
+        site_labels_path = package_data_path("site_data_assigned_16nov26.csv")
 
     data_ngaw3 = pd.read_csv(eas_flatfile_path, compression='zip')
     site_labels = pd.read_csv(site_labels_path)
