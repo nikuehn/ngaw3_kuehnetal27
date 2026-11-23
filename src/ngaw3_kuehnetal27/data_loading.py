@@ -161,11 +161,11 @@ def load_data(
         (data_ngaw3['vs30'] > 0) & \
         (data_ngaw3['sensor_depth'] <= 5) & \
         (~data_ngaw3['cosmos_station_type'].isin([7, 9, 10, 11, 12, 13, 14, 15, 20, 26, 50, 51, 52])) & \
-        (data_sel['synchronous_event'] == 0) & \
-        (data_sel['ffm_complexity'] != 3) & \
-        (data_sel['late_p_trigger'].isin(['-999',-999,'?'])) & \
-        (data_sel['late_s_trigger'].isin(['-999',-999,'?'])) & \
-        (data_sel['multiple_wave_train'] != 1) &\
+        (data_ngaw2['synchronous_event'] == 0) & \
+        (data_ngaw2_['ffm_complexity'] != 3) & \
+        (data_ngaw2_['late_p_trigger'].isin(['-999',-999,'?'])) & \
+        (data_ngaw2['late_s_trigger'].isin(['-999',-999,'?'])) & \
+        (data_ngaw2_['multiple_wave_train'] != 1) &\
         (~data_ngaw3['station_id'].isin(offshore_station_ids)) & \
         (~data_ngaw3['event_id'].isin(offshore_event_ids)) & \
         (~data_ngaw3['motion_id'].isin(outlier_ids)) & \
