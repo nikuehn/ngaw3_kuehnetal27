@@ -423,7 +423,8 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                     func_gs_scaling="stafford", estimate_gs_exp="fixed",
                     global_dict=None, calc_log_lik=False,
                     sharing_config=None,
-                    estimate_Rb_attneq=False, Rb_attneq=0.0):
+                    estimate_Rb_attneq=False, Rb_attneq=0.0,
+                    include_region=True, save_ranef=True):
     """
     Guide for `model_separate`. Same site set as `guide`, except every
     coefficient that's per-frequency-independent in `model_separate`
@@ -434,7 +435,13 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
     Must be called with the SAME sharing_config (and the same
     attn_Q / dist_cell / estimate_gs_break / estimate_zt_break /
     calc_nft / attn_eq / global_dict-is-None-or-not / func_gs_scaling /
-    estimate_gs_exp) as `model_separate` in every SVI run.
+    estimate_gs_exp / include_region) as `model_separate` in every SVI run.
+
+    Random effects are non-centered as in `model_eas`: mean-field Normal
+    guides on the raw sites (deltaS_raw, deltaB_raw, deltaB_attn_raw,
+    c_region_raw and the *_gl versions). `save_ranef` only affects the
+    model (deterministic sites); it is accepted here so the same kwargs
+    can be passed to model and guide.
 
     `estimate_Rb_attneq` must match the model; `Rb_attneq` (the fixed value
     used when it is False) is accepted so that model and guide can be called
@@ -601,14 +608,17 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         numpyro.sample("tau_0", dist.Delta(v=numpyro.param("loc_tau_0", -0.7 * jnp.ones(n_freq))))
         numpyro.sample("tau_1", dist.Delta(v=numpyro.param("loc_tau_1", -0.7 * jnp.ones(n_freq))))
 
-        numpyro.sample("sigma_region", dist.TransformedDistribution(
-            dist.Delta(v=numpyro.param("loc_log_sigma_region", -0.7 * jnp.ones(n_freq))),
-            transforms=dist.transforms.SoftplusTransform(),
-        ))
-        with numpyro.plate("plate_region", n_subregion, dim=-2):
-            numpyro.sample("c_region", dist.Delta(
-                v=numpyro.param("loc_c_region", jnp.zeros((n_subregion, n_freq))),
+        if include_region:
+            numpyro.sample("sigma_region", dist.TransformedDistribution(
+                dist.Delta(v=numpyro.param("loc_log_sigma_region", -0.7 * jnp.ones(n_freq))),
+                transforms=dist.transforms.SoftplusTransform(),
             ))
+            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                numpyro.sample("c_region_raw", dist.Normal(
+                    loc=numpyro.param("loc_c_region_raw", jnp.zeros((n_subregion, n_freq))),
+                    scale=numpyro.param("scale_c_region_raw", 0.2 * jnp.ones((n_subregion, n_freq)),
+                                         constraint=dist.constraints.positive),
+                ))
 
         with numpyro.plate("plate_basin", n_basin - 1, dim=-2):
             numpyro.sample("c_basin_coef", dist.Delta(
@@ -616,22 +626,22 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
             ))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            numpyro.sample("deltaS", dist.Normal(
-                loc=numpyro.param("loc_deltaS", jnp.zeros((n_stat, n_freq))),
-                scale=numpyro.param("scale_deltaS", 0.2 * jnp.ones((n_stat, n_freq)),
+            numpyro.sample("deltaS_raw", dist.Normal(
+                loc=numpyro.param("loc_deltaS_raw", jnp.zeros((n_stat, n_freq))),
+                scale=numpyro.param("scale_deltaS_raw", 0.2 * jnp.ones((n_stat, n_freq)),
                                      constraint=dist.constraints.positive),
             ))
 
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            numpyro.sample("deltaB", dist.Normal(
-                loc=numpyro.param("loc_deltaB", jnp.zeros((n_eq, n_freq))),
-                scale=numpyro.param("scale_deltaB", 0.2 * jnp.ones((n_eq, n_freq)),
+            numpyro.sample("deltaB_raw", dist.Normal(
+                loc=numpyro.param("loc_deltaB_raw", jnp.zeros((n_eq, n_freq))),
+                scale=numpyro.param("scale_deltaB_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                      constraint=dist.constraints.positive),
             ))
             if attn_eq:
-                numpyro.sample("deltaB_attn", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_attn", jnp.zeros((n_eq, n_freq))),
-                    scale=numpyro.param("scale_deltaB_attn", 0.2 * jnp.ones((n_eq, n_freq)),
+                numpyro.sample("deltaB_attn_raw", dist.Normal(
+                    loc=numpyro.param("loc_deltaB_attn_raw", jnp.zeros((n_eq, n_freq))),
+                    scale=numpyro.param("scale_deltaB_attn_raw", 0.2 * jnp.ones((n_eq, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
 
@@ -678,21 +688,21 @@ def guide_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 ))
 
             with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                numpyro.sample("deltaS_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaS_gl", jnp.zeros((n_stat_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaS_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
+                numpyro.sample("deltaS_raw_gl", dist.Normal(
+                    loc=numpyro.param("loc_deltaS_raw_gl", jnp.zeros((n_stat_gl, n_freq))),
+                    scale=numpyro.param("scale_deltaS_raw_gl", 0.2 * jnp.ones((n_stat_gl, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
 
             with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                numpyro.sample("deltaB_gl", dist.Normal(
-                    loc=numpyro.param("loc_deltaB_gl", jnp.zeros((n_eq_gl, n_freq))),
-                    scale=numpyro.param("scale_deltaB_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                numpyro.sample("deltaB_raw_gl", dist.Normal(
+                    loc=numpyro.param("loc_deltaB_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                    scale=numpyro.param("scale_deltaB_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
                                          constraint=dist.constraints.positive),
                 ))
                 if attn_eq:
-                    numpyro.sample("deltaB_attn_gl", dist.Normal(
-                        loc=numpyro.param("loc_deltaB_attn_gl", jnp.zeros((n_eq_gl, n_freq))),
-                        scale=numpyro.param("scale_deltaB_attn_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
+                    numpyro.sample("deltaB_attn_raw_gl", dist.Normal(
+                        loc=numpyro.param("loc_deltaB_attn_raw_gl", jnp.zeros((n_eq_gl, n_freq))),
+                        scale=numpyro.param("scale_deltaB_attn_raw_gl", 0.2 * jnp.ones((n_eq_gl, n_freq)),
                                              constraint=dist.constraints.positive),
                     ))

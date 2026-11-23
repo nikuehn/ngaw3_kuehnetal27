@@ -681,7 +681,8 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                     func_gs_scaling="stafford", estimate_gs_exp="fixed",
                     global_dict=None, calc_log_lik=False,
                     sharing_config=None,
-                    estimate_Rb_attneq=False, Rb_attneq=0.0):
+                    estimate_Rb_attneq=False, Rb_attneq=0.0,
+                    include_region=True, save_ranef=True):
     """
     Same functional form as `model`, but every frequency-dependent
     coefficient (median-scaling and standard-deviation) is modeled
@@ -719,6 +720,22 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
         reproduces the former behavior (slope from R = 0). Also used for
         the global dataset. The mean attenuation (`c_attn`) is not
         affected.
+
+    Random effects are non-centered, as in `model_eas`: the raw terms
+    (deltaS_raw, deltaB_raw, deltaB_attn_raw, c_region_raw, and the *_gl
+    versions when `global_dict` is given) are iid Normal(0, 1) and are
+    multiplied by their standard deviation afterwards (phi_s2s, tau,
+    tau_attn, sigma_region).
+
+    include_region : bool, default True
+        False: no geology subregion effect (neither `sigma_region` nor
+        `c_region_raw` is sampled; `c_region` is zero).
+    save_ranef : bool, default True
+        True: store deltaS, deltaB, deltaB_attn and c_region as
+        deterministic sites (as in `model_eas`).
+
+    Must be matched by the same `include_region`, `estimate_Rb_attneq` and
+    `Rb_attneq` values in `guide_separate`.
 
     Shared-vs-dataset-local routing (`sharing_config`) is unchanged --
     it's an orthogonal concern to spline vs. per-frequency-independent.
@@ -905,11 +922,12 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
         # --- geology subregion effect: independent per (subregion, frequency),
         # no correlation-across-frequency structure ---
-        sigma_region = numpyro.sample("sigma_region", dist.TransformedDistribution(
-            dist.Normal(-0.7, 0.5), dist.transforms.SoftplusTransform(),
-        ))
-        with numpyro.plate("plate_region", n_subregion, dim=-2):
-            c_subregion = numpyro.sample("c_region", dist.Normal(0.0, sigma_region))
+        if include_region:
+            sigma_region = numpyro.sample("sigma_region", dist.TransformedDistribution(
+                dist.Normal(-0.7, 0.5), dist.transforms.SoftplusTransform(),
+            ))
+            with numpyro.plate("plate_freq_region", n_subregion, dim=-2):
+                c_region_raw = numpyro.sample("c_region_raw", dist.Normal(0.0, 1.0))
 
         # --- basin term (WUS only) ---
         with numpyro.plate("plate_basin", n_basin - 1, dim=-2):
@@ -926,23 +944,31 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                                                    tau_0, tau_1, mb1, mb2, delta=0.2))
 
         with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
-            deltaS = numpyro.sample("deltaS", dist.TransformedDistribution(
-                dist.Normal(0, 1),
-                dist.transforms.AffineTransform(0, phi_s2s[vs_measured_id]),
-            ))
+            deltaS_raw = numpyro.sample("deltaS_raw", dist.Normal(0, 1))
 
         with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
-            deltaB = numpyro.sample("deltaB", dist.TransformedDistribution(
-                dist.Normal(0, 1),
-                dist.transforms.AffineTransform(0, tau),
-            ))
+            deltaB_raw = numpyro.sample("deltaB_raw", dist.Normal(0, 1))
             if attn_eq:
-                deltaB_attn = numpyro.sample("deltaB_attn", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, tau_attn),
-                ))
-            else:
-                deltaB_attn = jnp.zeros((n_eq, n_freq))
+                deltaB_attn_raw = numpyro.sample("deltaB_attn_raw", dist.Normal(0, 1))
+
+    # --- non-centered random effects: raw * standard deviation (as in model_eas) ---
+    deltaS = deltaS_raw * phi_s2s[vs_measured_id]
+    deltaB = deltaB_raw * tau
+    if attn_eq:
+        deltaB_attn = deltaB_attn_raw * tau_attn
+    else:
+        deltaB_attn = jnp.zeros((n_eq, n_freq))
+
+    if include_region:
+        c_subregion = c_region_raw * sigma_region
+    else:
+        c_subregion = jnp.zeros((n_subregion, n_freq))
+
+    if save_ranef:
+        numpyro.deterministic("deltaS", deltaS)
+        numpyro.deterministic("deltaB", deltaB)
+        numpyro.deterministic("deltaB_attn", deltaB_attn)
+        numpyro.deterministic("c_region", c_subregion)
 
     # --- gs_exp under 'coeff' mode: single scalar, not frequency-dependent ---
     if func_gs_scaling != "stafford" and estimate_gs_exp == "coeff":
@@ -1073,23 +1099,19 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
                 tau_attn_gl = numpyro.sample("tau_attn_gl", dist.HalfNormal(0.5))
 
             with numpyro.plate("plate_freq_stat_gl", n_stat_gl, dim=-2):
-                deltaS_gl = numpyro.sample("deltaS_gl", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, phi_s2s_gl),
-                ))
+                deltaS_raw_gl = numpyro.sample("deltaS_raw_gl", dist.Normal(0, 1))
 
             with numpyro.plate("plate_freq_eq_gl", n_eq_gl, dim=-2):
-                deltaB_gl = numpyro.sample("deltaB_gl", dist.TransformedDistribution(
-                    dist.Normal(0, 1),
-                    dist.transforms.AffineTransform(0, tau_gl),
-                ))
+                deltaB_raw_gl = numpyro.sample("deltaB_raw_gl", dist.Normal(0, 1))
                 if attn_eq:
-                    deltaB_attn_gl = numpyro.sample("deltaB_attn_gl", dist.TransformedDistribution(
-                        dist.Normal(0, 1),
-                        dist.transforms.AffineTransform(0, tau_attn_gl),
-                    ))
-                else:
-                    deltaB_attn_gl = jnp.zeros((n_eq_gl, n_freq))
+                    deltaB_attn_raw_gl = numpyro.sample("deltaB_attn_raw_gl", dist.Normal(0, 1))
+
+        deltaS_gl = numpyro.deterministic("deltaS_gl", deltaS_raw_gl * phi_s2s_gl)
+        deltaB_gl = numpyro.deterministic("deltaB_gl", deltaB_raw_gl * tau_gl)
+        if attn_eq:
+            deltaB_attn_gl = numpyro.deterministic("deltaB_attn_gl", deltaB_attn_raw_gl * tau_attn_gl)
+        else:
+            deltaB_attn_gl = jnp.zeros((n_eq_gl, n_freq))
 
         c_basin_gl = jnp.zeros((1, n_freq))
         c_subregion_gl = jnp.zeros((1, n_freq))
