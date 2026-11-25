@@ -98,11 +98,11 @@ DEFAULT_PRIOR: Dict[str, list] = {
     "c_basin": [0.0, 0.5],
 
     # --- c_0 parametric sub-parameters (c0_parametric=True) ---
-    "c_0_ic": [0.0, 2.0],
+    "c_0_ic": [-1.5, 3.0],
     "c_0_slope1": [0.35, 0.45],
     "c_0_slope2": [0.2],
     "c_0_fb": [0.0, 1.0],
-    "c_0_delta": [0.2],
+    "c_0_delta": [-1.2, 0.5],
     "c_0_kappa_star": [0.3],       # shared: sampled here when c0_parametric, or directly in model_eas otherwise
 
     # --- c_gs1 parametric sub-parameters (cgs1_parametric=True) ---
@@ -282,7 +282,7 @@ def sample_c0_coefficient(
             slope1 = numpyro.sample(f"{name}_slope1", dist.LogNormal(*prior_config["c_0_slope1"]))
             slope2 = numpyro.sample(f"{name}_slope2", dist.HalfNormal(*prior_config["c_0_slope2"]))
             fb = numpyro.sample(f"{name}_fb", dist.Normal(*prior_config["c_0_fb"]))
-            delta = numpyro.sample(f"{name}_delta", dist.HalfNormal(*prior_config["c_0_delta"]))
+            delta = numpyro.sample(f"{name}_delta", dist.LogNormal(*prior_config["c_0_delta"]))
             kappa_star = numpyro.sample(f"{name}_kappa_star", dist.HalfNormal(*prior_config["c_0_kappa_star"]))
             if name == "c_0":
                 kappa_star_wus["value"] = kappa_star
