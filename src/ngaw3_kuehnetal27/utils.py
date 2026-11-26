@@ -50,9 +50,11 @@ def attn_eq_distance(R_scaled: Array, Rb_attneq: Array = 0.0, smooth: bool = Fal
 def func_gs(R: Array, lnR: Array, c_gs1: Array, c_gs2: Array, gs_break: Array,
             delta_gs: Array, xi: Array) -> Array:
     """Geometric spreading, power-law hinge form."""
-    return c_gs1 * lnR + (c_gs2 - c_gs1) * delta_gs * jnp.log(
-        (R ** xi + gs_break ** xi) / (1 + gs_break ** xi)
-    )
+    # return c_gs1 * lnR + (c_gs2 - c_gs1) * delta_gs * jnp.log(
+    #     (R ** xi + gs_break ** xi) / (1 + gs_break ** xi)
+    # )
+    s = xi * jnp.log(gs_break)
+    return c_gs1 * lnR + (c_gs2 - c_gs1) * delta_gs * (jnp.logaddexp(xi * jnp.log(R), s) - jnp.logaddexp(0.0, s))
 
 
 def func_gs_lh(lnR: Array, c_gs1: Array, c_gs2: Array, gs_break: Array, delta_gs: Array) -> Array:
