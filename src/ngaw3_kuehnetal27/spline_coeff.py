@@ -82,17 +82,25 @@ def make_spline_coeff(spline_basis, name, mu_loc=0, mu_scale=2,
 
     sigma_spline = numpyro.sample(f"sigma_spline_{name}", dist.HalfNormal(1))
     if monotonic == "increasing":
+        # n-1 increments: the first coefficient is fixed at 0, because the
+        # B-spline basis sums to 1 and a free first increment would be
+        # exactly confounded with `mu`.
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",
-            dist.HalfNormal(jnp.ones(n_spline_coefs)),
+            dist.HalfNormal(jnp.ones(n_spline_coefs - 1)),
         )
-        spline_coefs = jnp.cumsum(sigma_spline * spline_coefs_raw)
+        spline_coefs = jnp.cumsum(
+            jnp.concatenate([jnp.zeros(1), sigma_spline * spline_coefs_raw]))
     elif monotonic == "decreasing":
+        # n-1 increments: the first coefficient is fixed at 0, because the
+        # B-spline basis sums to 1 and a free first increment would be
+        # exactly confounded with `mu`.
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",
-            dist.HalfNormal(jnp.ones(n_spline_coefs)),
+            dist.HalfNormal(jnp.ones(n_spline_coefs - 1)),
         )
-        spline_coefs = -jnp.cumsum(sigma_spline * spline_coefs_raw)
+        spline_coefs = -jnp.cumsum(
+            jnp.concatenate([jnp.zeros(1), sigma_spline * spline_coefs_raw]))
     else:
         spline_coefs_raw = numpyro.sample(
             f"spline_coefs_raw_{name}",

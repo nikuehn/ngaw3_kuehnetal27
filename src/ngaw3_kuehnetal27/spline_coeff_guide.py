@@ -56,7 +56,7 @@ def make_spline_coeff_guide(spline_basis, name, monotonic=None,
                 dist.Delta(
                     v=numpyro.param(
                         f"loc_log_spline_coefs_raw_{name}",
-                        init_value=jnp.zeros(n_spline_coefs),
+                        init_value=jnp.zeros(n_spline_coefs - 1),
                     )
                 ),
                 transforms=dist.transforms.ExpTransform(),
