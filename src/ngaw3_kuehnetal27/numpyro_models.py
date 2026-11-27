@@ -39,6 +39,9 @@ from ngaw3_kuehnetal27.utils import (
     compute_magnitude_gradients_lh,
     insert_zero_row,
     attn_eq_distance,
+    logistic_hinge,
+    smooth_trilinear_centered,
+    smooth_trilinear_ramp,
 )
 
 
@@ -1149,3 +1152,571 @@ def model_separate(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
 
         numpyro.sample("obs_gl", dist.StudentT(loc=median_obs_gl, scale=scale_obs_gl, df=df_obs_gl),
                         obs=Y_obs_gl)
+
+
+def model_eas_centered(F, X_rec, X_eq, X_stat, X_id, nl_model_dict,
+              Y=None, dist_cell=None, attn_eq=True,
+              ref_basin_id=1,
+              regularize_grad=False, regularization_sigma=0.1,
+              calc_nft="ya14", include_mag_unc="None", attn_Q=True,
+              estimate_gs_break=False, estimate_zt_break=False,
+              freq_id_grad=(0, 6, 8, 10, 16, 20, 23),
+              spline_degree=3, spline_df=7,
+              c0_parametric=False, cgs1_parametric=False,
+              calc_dWS=False, save_f_nl=False,
+              func_gs_scaling="stafford", estimate_gs_exp="fixed",
+              L_freq=None, global_dict=None, calc_log_lik=False,
+              sharing_config=None, estimate_kappa=None,
+              save_kappa_adj=True, save_ranef=True,
+              estimate_cvs=True, amp1d_dict=None, prior_config=None,
+              include_region=True, save_means=False,
+              estimate_Rb_attneq=False, Rb_attneq=0.0):
+    """
+    Variant of `model_eas` with CENTERED random effects (no `zerosumnormal`).
+
+    Instead of raw ~ N(0, 1) scaled by the standard deviation, the totals
+    are sampled directly, centered on their regression mean:
+
+      u_B[eq]  ~ Normal(mu_ev[eq],  tau[eq])       event term incl. c_0, Zt hinge,
+                                                    c_nm, c_rev, magnitude scaling
+      u_A[eq]  ~ Normal(mu_att,     tau_attn)      event-specific distance slope
+                                                    incl. the mean attenuation slope
+      u_S[stat]~ Normal(mu_st[stat], phi_s2s)      station term incl. c_vs * lnVS,
+                                                    basin and subregion terms
+      c_region ~ MultivariateNormal(0, sigma_region L_freq)       (centered)
+      ln_kappa_region ~ Normal(ln c_0_kappa_star, sigma_ln_kappa_region)
+
+    and deltaB = u_B - mu_ev, deltaS = u_S - mu_st, deltaB_attn = u_A - mu_att
+    are passed to the (unchanged) median function, which adds the means back,
+    so the model is mathematically the same as `model_eas`. With informative
+    data per event / station the data fix u_B + (everything else), and this
+    parameterization removes the posterior coupling between the random
+    effects and the coefficients that enter their means.
+
+    mu_att is the mean attenuation slope per 100 km (Q or c_attn mode) and is
+    only exact if the event slope acts from R = 0 (fixed `Rb_attneq=0`, no
+    dist_cell); otherwise u_A is centered on 0.
+
+    Kappa: with `c0_parametric` and kappa estimation the term -c_0_kappa_star*F
+    in c_0 is moved out of mu_ev, so the likelihood only sees the total
+    kappa of the region, exp(ln_kappa_region).
+
+    Sites (changed): u_B, u_A, u_S, c_region (now a sample site),
+    ln_kappa_region, ln_kappa_station. Deterministic m_region, m_station,
+    kappa_region_table, kappa_adj as before. `save_ranef` stores deltaB,
+    deltaS, deltaB_attn; `save_means` additionally stores mu_ev, mu_st, mu_att
+    (large: only for `centered_init_from_noncentered`).
+
+    Only WUS data (global_dict must be None). The matching guide is
+    `guide_eas_centered`.
+    """
+
+    sharing_config = sharing_config if sharing_config is not None else DEFAULT_COEFFICIENT_SHARING
+    prior_config = prior_config if prior_config is not None else DEFAULT_PRIOR
+
+    # ------------------------------------------------------------------
+    # WUS data
+    # ------------------------------------------------------------------
+    R, Rjb, Rx, Ry0 = X_rec.T
+    M_eq, Zt_eq, Fnm_eq, Frev_eq, FW_eq, Dip_eq, M_sd = X_eq.T
+    VS_stat, VS_stat_sd, vs_meas_id = X_stat.T
+    eq_id, stat_id, subregion_id, basin_id = X_id.T
+    vs_measured_id = vs_meas_id.astype("int")
+
+    Zt_eq_scaled = Zt_eq / 10.0
+    R_scaled = R / 100.0
+    if global_dict is not None:
+        raise NotImplementedError("model_eas_centered supports WUS data only (global_dict=None)")
+    Rb_attneq_is_zero = (not estimate_Rb_attneq) and float(Rb_attneq) == 0.0
+    # station-level subregion / basin: needed for the centered station mean
+    _stat = np.asarray(stat_id).astype(int)
+    _sreg = np.asarray(subregion_id).astype(int)
+    _sbas = np.asarray(basin_id).astype(int)
+    stat_region = np.zeros(X_stat.shape[0], dtype=int)
+    stat_basin = np.zeros(X_stat.shape[0], dtype=int)
+    stat_region[_stat] = _sreg
+    stat_basin[_stat] = _sbas
+    if not (np.all(stat_region[_stat] == _sreg) and np.all(stat_basin[_stat] == _sbas)):
+        raise ValueError("subregion_id / basin_id must be constant per station in model_eas_centered")
+    if estimate_Rb_attneq and not attn_eq:
+        raise ValueError("estimate_Rb_attneq=True needs attn_eq=True")
+    if attn_eq:
+        Rb_attneq = sample_Rb_attneq(estimate_Rb_attneq, Rb_attneq)
+        R_scaled_eq = attn_eq_distance(R_scaled, Rb_attneq, smooth=estimate_Rb_attneq)
+    else:
+        R_scaled_eq = None
+
+    ln_F = np.log(F)
+    spline_basis = make_spline_basis(F, spline_degree, spline_df)
+
+    n_stat = X_stat.shape[0]
+    n_eq = X_eq.shape[0]
+    n_rec = X_rec.shape[0]
+    n_subregion = np.max(subregion_id) + 1
+    n_basin = np.max(basin_id) + 1
+    n_freq = len(F)
+
+    mu_freq = jnp.zeros(n_freq)
+    if L_freq is None:
+        L_freq = jnp.eye(n_freq)
+
+    const = ModelConstants()
+    mb1, mb2, c_gs2, xi, delta_gs = const.mb1, const.mb2, const.c_gs2, const.xi, const.delta_gs
+
+    V_ref = 800.0
+    log_V_ref = jnp.log(V_ref)
+    lnVS = jnp.log(VS_stat) - log_V_ref
+
+    # --- geometric spreading break: WUS-only estimate; global always fixed ---
+    if estimate_gs_break:
+        gs_break = numpyro.sample("gs_break", dist.Gamma(*prior_config["gs_break"]))
+    else:
+        gs_break = 50.0
+
+    # --- magnitude uncertainty (WUS only, as in original) ---
+    if include_mag_unc == "Classical":
+        mean_M = numpyro.sample("mean_M", dist.Normal(*prior_config["mean_M"]))
+        sigma_M = numpyro.sample("sigma_M", dist.LogNormal(*prior_config["sigma_M"]))
+        M_model = numpyro.sample("M_model", dist.Normal(mean_M, sigma_M).expand([n_eq]))
+        numpyro.sample("M_obs", dist.Normal(M_model, M_sd), obs=M_eq)
+    elif include_mag_unc == "Berkson":
+        M_model = numpyro.sample("M_model", dist.Normal(M_eq, M_sd))
+    else:
+        M_model = M_eq
+
+    # --- attenuation ---
+    # dist_cell / Q modes are WUS-only: global has no per-path distance-cell
+    # or Q covariates, so it always falls back to the simple c_attn spline,
+    # regardless of what WUS uses (see notes at the end of this file).
+    if dist_cell is not None:
+        attn_mode = "dist_cell"
+        n_cell = dist_cell.shape[1]
+        mu_Q_0 = numpyro.sample("mu_Q_0", dist.Gamma(*prior_config["mu_Q_0"]))
+        Q_exp = numpyro.sample("Q_exp", dist.Gamma(*prior_config["Q_exp"]))
+        sigma_Q_0 = numpyro.sample("sigma_Q_0", dist.HalfNormal(*prior_config["sigma_Q_0"]))
+        with numpyro.plate("plate_cell", n_cell, dim=-1):
+            Q_0 = numpyro.sample("Q_0", dist.TruncatedNormal(mu_Q_0, sigma_Q_0, low=0))
+        c_attn = None
+    elif attn_Q:
+        attn_mode = "Q"
+        Q_0 = numpyro.sample("Q_0", dist.Gamma(*prior_config["Q_0"]))
+        Q_exp = numpyro.sample("Q_exp", dist.Gamma(*prior_config["Q_exp"]))
+        c_attn = None
+    else:
+        attn_mode = "c_attn"
+        Q_0 = None
+        Q_exp = None
+
+    if attn_mode == "c_attn":
+        c_attn, c_attn_gl = sample_median_coefficient(
+            "c_attn", spline_basis, sharing_config, prior_config,
+            positive=True, transform="softplus",
+        )
+    elif global_dict is not None:
+        # No WUS c_attn to (potentially) share -- global samples its own,
+        # same spline structure as the 'c_attn' branch above would use.
+        c_attn_gl = make_spline_coeff(
+            spline_basis, "c_attn_gl", mu_loc=prior_config["c_attn"][0], mu_scale=prior_config["c_attn"][1],
+            positive=True, transform="softplus",
+        )
+    else:
+        c_attn_gl = None
+
+    # --- zt_break: WUS-only estimate; global always fixed ---
+    if estimate_zt_break:
+        zt_break = numpyro.sample("zt_break", dist.Gamma(*prior_config["zt_break"]))
+    else:
+        zt_break = 1.5
+
+    # c_m3: single scalar (not frequency-dependent), always shared as in
+    # the original -- there's no dataset_local path implemented for this
+    # one yet, so sharing_config["c_m3"] is currently a no-op placeholder.
+    c_m3 = numpyro.sample("c_m3", dist.LogNormal(*prior_config["c_m3"]))
+    c_m3_gl = c_m3
+
+    # c_nft_1/c_nft_2: only the 'freq' mode is a spline; 'ya14'/'coeff' are
+    # scalars. Same as c_m3, always shared -- no dataset_local path exists
+    # for these yet.
+    if calc_nft == "ya14":
+        c_nft_1 = -1.72 * jnp.log(10) + 0.43 * jnp.log(10) * 4.5
+        c_nft_2 = 0.43 * jnp.log(10)
+    elif calc_nft == "coeff":
+        c_nft_1 = numpyro.sample("c_nft_1", dist.Normal(*prior_config["c_nft_1"]))
+        c_nft_2 = numpyro.sample("c_nft_2", dist.LogNormal(*prior_config["c_nft_2"]))
+    elif calc_nft == "freq":
+        c_nft_1 = make_spline_coeff(spline_basis, "c_nft_1", mu_loc=prior_config["c_nft_1"][0],
+                                     mu_scale=prior_config["c_nft_1"][1], monotonic="decreasing")
+        c_nft_2 = make_spline_coeff(spline_basis, "c_nft_2", mu_loc=prior_config["c_nft_2"][0],
+                                     mu_scale=prior_config["c_nft_2"][1],
+                                     positive=True, transform="softplus", monotonic="increasing")
+    c_nft_1_gl, c_nft_2_gl = c_nft_1, c_nft_2
+
+    # --- c_0, c_gs1: parametric-vs-spline switch, applied consistently ---
+    c_0, c_0_gl, c_0_kappa_star = sample_c0_coefficient(
+        spline_basis, ln_F, F, sharing_config, prior_config, parametric=c0_parametric,
+    )
+    c_gs1, c_gs1_gl = sample_cgs1_coefficient(
+        spline_basis, ln_F, sharing_config, prior_config, parametric=cgs1_parametric,
+    )
+
+    # --- remaining spline coefficients, via the generic sampler ---
+    c_m1, c_m1_gl = sample_median_coefficient(
+        "c_m1", spline_basis, sharing_config, prior_config,
+        positive=True, transform="softplus", monotonic="decreasing",
+    )
+    c_m2, c_m2_gl = sample_median_coefficient(
+        "c_m2", spline_basis, sharing_config, prior_config,
+        positive=True, transform="softplus", monotonic="decreasing",
+    )
+    c_zt, c_zt_gl = sample_median_coefficient(
+        "c_zt", spline_basis, sharing_config, prior_config,
+    )
+    c_nm, c_nm_gl = sample_median_coefficient(
+        "c_nm", spline_basis, sharing_config, prior_config,
+    )
+    c_rev, c_rev_gl = sample_median_coefficient(
+        "c_rev", spline_basis, sharing_config, prior_config,
+    )
+    c_hw, c_hw_gl = sample_median_coefficient(
+        "c_hw", spline_basis, sharing_config, prior_config,
+    )
+
+    # --- Vs30 categories ---
+    # WUS distinguishes measured vs. estimated Vs30 (2 categories); global
+    # has no such distinction (1 category). Per the consistency principle,
+    # global's single category is now a spline too (previously a flat
+    # per-frequency Normal) -- see notes below.
+    # estimate_cvs=False fixes both vs30-scaling coefficients at zero --
+    # e.g. when amp1d_dict supplies precomputed site amplification and no
+    # residual vs30 term is wanted on top of it.
+    if estimate_cvs:
+        c_vs_meas = make_spline_coeff(spline_basis, "c_vs_meas", mu_loc=prior_config["c_vs_meas"][0],
+                                       mu_scale=prior_config["c_vs_meas"][1])
+        c_vs_est = make_spline_coeff(spline_basis, "c_vs_est", mu_loc=prior_config["c_vs_est"][0],
+                                      mu_scale=prior_config["c_vs_est"][1])
+    else:
+        c_vs_meas = numpyro.deterministic("c_vs_meas", jnp.zeros(n_freq))
+        c_vs_est = numpyro.deterministic("c_vs_est", jnp.zeros(n_freq))
+    c_vs = jnp.stack([c_vs_meas, c_vs_est])
+    if global_dict is not None:
+        c_vs_gl_single = make_spline_coeff(spline_basis, "c_vs_gl", mu_loc=prior_config["c_vs_gl"][0],
+                                            mu_scale=prior_config["c_vs_gl"][1])
+        c_vs_gl = jnp.stack([c_vs_gl_single])
+
+    # --- geometric spreading exponent (logistic-hinge form only) ---
+    if func_gs_scaling == "stafford":
+        gs_exp = 2.0
+    else:
+        if estimate_gs_exp == "fixed":
+            gs_exp = 2.0
+        elif estimate_gs_exp == "coeff":
+            gs_exp = numpyro.sample("gs_exp", dist.InverseGamma(*prior_config["gs_exp"]))
+        elif estimate_gs_exp == "freq":
+            gs_exp = make_spline_coeff(spline_basis, "gs_exp", mu_loc=prior_config["gs_exp_freq"][0],
+                                        mu_scale=prior_config["gs_exp_freq"][1],
+                                        positive=True, transform="softplus")
+
+    # --- standard deviations / random effects (WUS) ---
+    phi_s2s_meas = make_spline_coeff(spline_basis, "phi_s2s_meas", mu_loc=prior_config["phi_s2s_meas"][0],
+                                      mu_scale=prior_config["phi_s2s_meas"][1],
+                                      positive=True, transform="softplus")
+    phi_s2s_est = make_spline_coeff(spline_basis, "phi_s2s_est", mu_loc=prior_config["phi_s2s_est"][0],
+                                     mu_scale=prior_config["phi_s2s_est"][1],
+                                     positive=True, transform="softplus")
+    phi_s2s = jnp.stack([phi_s2s_meas, phi_s2s_est])
+
+    if attn_eq:
+        tau_attn = make_spline_coeff(spline_basis, "tau_attn", mu_loc=prior_config["tau_attn"][0],
+                                      mu_scale=prior_config["tau_attn"][1],
+                                      positive=True, transform="softplus")
+
+    phi_ss_0 = make_spline_coeff(spline_basis, "phi_ss_0", mu_loc=prior_config["phi_ss_0"][0],
+                                  mu_scale=prior_config["phi_ss_0"][1])
+    phi_ss_1 = make_spline_coeff(spline_basis, "phi_ss_1", mu_loc=prior_config["phi_ss_1"][0],
+                                  mu_scale=prior_config["phi_ss_1"][1])
+    phi_ss = jnp.exp(smooth_trilinear_ramp_repar(M_model[eq_id, jnp.newaxis],
+                                                  phi_ss_0, phi_ss_1, mb1, mb2, delta=0.2))
+
+    tau_0 = make_spline_coeff(spline_basis, "tau_0", mu_loc=prior_config["tau_0"][0],
+                               mu_scale=prior_config["tau_0"][1])
+    tau_1 = make_spline_coeff(spline_basis, "tau_1", mu_loc=prior_config["tau_1"][0],
+                               mu_scale=prior_config["tau_1"][1])
+    tau = jnp.exp(smooth_trilinear_ramp_repar(M_model[:, jnp.newaxis],
+                                               tau_0, tau_1, mb1, mb2, delta=0.2))
+
+
+    # --- kappa random effect (WUS only), CENTERED ---
+    estimate_region_kappa = estimate_kappa in ("regional", "hierarchical")
+    estimate_station_kappa = estimate_kappa in ("station", "hierarchical")
+    estimate_any_kappa = estimate_region_kappa or estimate_station_kappa
+
+    if estimate_any_kappa:
+        if not c0_parametric:
+            c_0_kappa_star = numpyro.sample("c_0_kappa_star", dist.HalfNormal(*prior_config["c_0_kappa_star"]))
+        # else: c_0_kappa_star already sampled inside sample_c0_coefficient above
+        ln_kappa_star = jnp.log(c_0_kappa_star)
+
+        if estimate_region_kappa:
+            sigma_ln_kappa_region = numpyro.sample("sigma_ln_kappa_region",
+                                                     dist.Exponential(*prior_config["sigma_ln_kappa_region"]))
+            with numpyro.plate("plate_region", n_subregion, dim=-1):
+                ln_kappa_region = numpyro.sample("ln_kappa_region",
+                                                  dist.Normal(ln_kappa_star, sigma_ln_kappa_region))
+            m_region = numpyro.deterministic("m_region", jnp.exp(ln_kappa_region - ln_kappa_star))
+            m_region_id = m_region[subregion_id]
+
+            if c0_parametric:
+                kappa_region_table = numpyro.deterministic("kappa_region_table", c_0_kappa_star * (m_region - 1.0))
+            else:
+                kappa_region_table = numpyro.deterministic("kappa_region_table", c_0_kappa_star * m_region)
+        else:
+            m_region_id = 1.0
+
+        if estimate_station_kappa:
+            sigma_ln_kappa_station = numpyro.sample("sigma_ln_kappa_station",
+                                                      dist.Exponential(*prior_config["sigma_ln_kappa_station"]))
+            # station kappa is centered on the kappa of its region (if estimated)
+            if estimate_region_kappa:
+                ln_kappa_station_mean = ln_kappa_region[stat_region]
+            else:
+                ln_kappa_station_mean = ln_kappa_star
+            with numpyro.plate("plate_kappa_stat", n_stat, dim=-1):
+                ln_kappa_station = numpyro.sample("ln_kappa_station",
+                                                   dist.Normal(ln_kappa_station_mean, sigma_ln_kappa_station))
+            m_station = numpyro.deterministic("m_station", jnp.exp(ln_kappa_station - ln_kappa_station_mean))
+            m_station_id = m_station[stat_id]
+
+            if c0_parametric:
+                kappa_station_table = numpyro.deterministic("kappa_station_table", c_0_kappa_star * (m_station - 1.0))
+            else:
+                kappa_station_table = numpyro.deterministic("kappa_station_table", c_0_kappa_star * m_station)
+        else:
+            m_station_id = 1.0
+
+        if c0_parametric:
+            # c_0 contains -c_0_kappa_star * F; deviation on top of it
+            kappa_adj = c_0_kappa_star * (m_region_id * m_station_id - 1.0)
+        else:
+            kappa_adj = c_0_kappa_star * m_region_id * m_station_id
+
+        if save_kappa_adj:
+            numpyro.deterministic("kappa_adj", kappa_adj)
+
+    else:
+        kappa_adj = None
+
+    # --- basin term (WUS only) ---
+    c_basin_sample = jnp.stack([
+        make_spline_coeff(spline_basis, f"c_b_{i}", mu_loc=prior_config["c_basin"][0],
+                           mu_scale=prior_config["c_basin"][1])
+        for i in np.arange(n_basin - 1)
+    ])
+    c_basin = numpyro.deterministic("c_basin", insert_zero_row(ref_basin_id, c_basin_sample))
+
+
+    # --- geology subregion random effect (WUS only), CENTERED ---
+    if include_region:
+        sigma_subregion = make_spline_coeff(spline_basis, "sigma_region", mu_loc=-0.7, mu_scale=0.5,
+                                            positive=True, transform="softplus")
+        L_subregion = sigma_subregion[..., None] * L_freq
+        with numpyro.plate("plate_region_c", n_subregion, dim=-1):
+            c_subregion = numpyro.sample("c_region", dist.MultivariateNormal(loc=mu_freq, scale_tril=L_subregion))
+    else:
+        c_subregion = jnp.zeros((n_subregion, n_freq))
+
+    # --- regression means of the event / station terms ---
+    f_flt_eq = smooth_trilinear_ramp(M_model, 1.0, 4.5, 5.5)
+    if estimate_any_kappa and c0_parametric:
+        # -c_0_kappa_star * F is carried by the kappa term (see docstring)
+        c_0_ev = c_0 + c_0_kappa_star * F
+    else:
+        c_0_ev = c_0
+    mu_ev = (
+        c_0_ev[jnp.newaxis, :]
+        + logistic_hinge(Zt_eq_scaled[:, jnp.newaxis], c_zt, const.c_zt2, zt_break, const.delta_zt)
+        + c_nm * (f_flt_eq * Fnm_eq)[:, jnp.newaxis]
+        + c_rev * (f_flt_eq * Frev_eq)[:, jnp.newaxis]
+        + smooth_trilinear_centered(M_model[:, jnp.newaxis], c_m1, c_m2, c_m3, mb1, mb2, delta=0.2)
+    )
+    mu_st = (c_vs[vs_measured_id] * lnVS[:, jnp.newaxis]
+             + c_basin[stat_basin] + c_subregion[stat_region])
+    if attn_eq:
+        if Rb_attneq_is_zero and attn_mode == "Q":
+            mu_att = -100.0 * jnp.pi * F ** Q_exp / (Q_0 * const.c_Q)
+        elif Rb_attneq_is_zero and attn_mode == "c_attn":
+            mu_att = -c_attn
+        else:
+            mu_att = jnp.zeros(n_freq)
+
+    with numpyro.plate("plate_freq", n_freq, dim=-1):
+        nu_rec = numpyro.sample("nu_rec", dist.Gamma(*prior_config["nu_rec"]))
+
+        with numpyro.plate("plate_freq_stat", n_stat, dim=-2):
+            u_S = numpyro.sample("u_S", dist.Normal(mu_st, phi_s2s[vs_measured_id]))
+
+        with numpyro.plate("plate_freq_eq", n_eq, dim=-2):
+            u_B = numpyro.sample("u_B", dist.Normal(mu_ev, tau))
+            if attn_eq:
+                u_A = numpyro.sample("u_A", dist.Normal(mu_att, tau_attn))
+
+    deltaS = u_S - mu_st
+    deltaB = u_B - mu_ev
+    if attn_eq:
+        deltaB_attn = u_A - mu_att
+    else:
+        deltaB_attn = jnp.zeros((n_eq, n_freq))
+
+    if save_ranef:
+        numpyro.deterministic("deltaS", deltaS)
+        numpyro.deterministic("deltaB", deltaB)
+        numpyro.deterministic("deltaB_attn", deltaB_attn)
+    if save_means:
+        numpyro.deterministic("mu_ev", mu_ev)
+        numpyro.deterministic("mu_st", mu_st)
+        if attn_eq:
+            numpyro.deterministic("mu_att", mu_att)
+
+
+
+    # --- monotonicity regularization on magnitude scaling (WUS only) ---
+    numpyro.factor("reg_c_m2", jnp.where(c_m2 > c_m1,
+                                          dist.Normal(0, regularization_sigma).log_prob(c_m2 - c_m1),
+                                          dist.Normal(0, regularization_sigma).log_prob(0)))
+    numpyro.factor("reg_c_m3", jnp.where(c_m3 > c_m2,
+                                          dist.Normal(0, regularization_sigma).log_prob(c_m3 - c_m2),
+                                          dist.Normal(0, regularization_sigma).log_prob(0)))
+
+    # --- assemble WUS and call the median function ---
+    ev_params = EventParams(
+        M_model=M_model, Zt_eq=Zt_eq, Dip_eq=Dip_eq, FW_eq=FW_eq,
+        Zt_eq_scaled=Zt_eq_scaled, Fnm_eq=Fnm_eq, Frev_eq=Frev_eq,
+    )
+    site_params = SiteParams(VS_stat=VS_stat, lnVS=lnVS, vs_measured_id=vs_measured_id)
+    idx = RecordIndex(eq_id=eq_id, stat_id=stat_id, subregion_id=subregion_id, basin_id=basin_id)
+
+    coef_wus = Coefficients(
+        c_0=c_0, c_m1=c_m1, c_m2=c_m2, c_m3=c_m3, c_hw=c_hw,
+        c_nft_1=c_nft_1, c_nft_2=c_nft_2, c_nm=c_nm, c_rev=c_rev,
+        c_gs1=c_gs1, c_zt=c_zt, c_vs=c_vs,
+        gs_break=gs_break, gs_exp=gs_exp, zt_break=zt_break,
+        attn_mode=attn_mode, Q_0=Q_0, Q_exp=Q_exp, c_attn=c_attn,
+    )
+
+    median, f_nl = calculate_median_training(
+        R=R, Rx=Rx, Ry0=Ry0, F=F, R_scaled=R_scaled, R_scaled_eq=R_scaled_eq, dist_cell=dist_cell,
+        idx=idx, evt_by_eq=ev_params, site_by_stat=site_params,
+        coef=coef_wus, const=const, func_gs_scaling=func_gs_scaling,
+        nl_model_dict=nl_model_dict,
+        deltaB=deltaB, deltaS=deltaS, deltaB_attn=deltaB_attn,
+        c_basin=c_basin, c_subregion=c_subregion,
+        kappa_adj=kappa_adj,
+        amp1d_dict=amp1d_dict,
+    )
+
+    if save_f_nl:
+        numpyro.deterministic("f_nl", f_nl)
+
+    if calc_dWS:
+        numpyro.deterministic("deltaWS", Y - median)
+
+    if regularize_grad:
+        magnitudes = jnp.linspace(6, 8, 9)
+        c_nft_1_arr = c_nft_1[freq_id_grad] if calc_nft == "freq" else jnp.full(len(freq_id_grad), c_nft_1)
+        c_nft_2_arr = c_nft_2[freq_id_grad] if calc_nft == "freq" else jnp.full(len(freq_id_grad), c_nft_2)
+
+        if func_gs_scaling == "stafford":
+            grad_r1 = compute_magnitude_gradients(
+                magnitudes, 1.0,
+                c_m1[freq_id_grad], c_m2[freq_id_grad], c_m3,
+                c_gs1[freq_id_grad], c_gs2, c_nft_1_arr, c_nft_2_arr,
+                mb1, mb2, delta_gs, gs_break, xi,
+            )
+        else:
+            gs_exp_array = gs_exp[freq_id_grad] if estimate_gs_exp == "freq" else jnp.full(len(freq_id_grad), gs_exp)
+            grad_r1 = compute_magnitude_gradients_lh(
+                magnitudes, 1.0,
+                c_m1[freq_id_grad], c_m2[freq_id_grad], c_m3,
+                c_gs1[freq_id_grad], c_gs2, c_nft_1_arr, c_nft_2_arr,
+                mb1, mb2, gs_break, gs_exp_array,
+            )
+        numpyro.factor("grad_r1", jnp.where(
+            grad_r1 < 0,
+            dist.Normal(0, regularization_sigma).log_prob(grad_r1),
+            dist.Normal(0, regularization_sigma).log_prob(0),
+        ))
+
+    if Y is not None:
+        obs_mask = ~np.isnan(Y)
+        Y_obs = Y[obs_mask]
+        median_obs = median[obs_mask]
+        scale_obs = (jnp.ones((n_rec, n_freq)) * phi_ss)[obs_mask]
+        df_obs = (jnp.ones((n_rec, n_freq)) * nu_rec)[obs_mask]
+
+        if calc_log_lik:
+            with numpyro.plate("data", n_rec):
+                numpyro.deterministic(
+                    "obs_log_lik",
+                    dist.StudentT(loc=median_obs, scale=scale_obs, df=df_obs).log_prob(Y_obs),
+                )
+    else:
+        Y_obs = None
+        median_obs = median
+        scale_obs = jnp.ones((n_rec, n_freq)) * phi_ss
+        df_obs = jnp.ones((n_rec, n_freq)) * nu_rec
+
+    numpyro.sample("obs", dist.StudentT(loc=median_obs, scale=scale_obs, df=df_obs), obs=Y_obs)
+
+
+def centered_init_from_noncentered(init_nc, model_kwargs):
+    """
+    Convert an init-value dict of `model_eas` (constrained scale, e.g. built
+    from an SVI fit: coefficients plus the *_raw random-effect sites) into
+    one for `model_eas_centered`.
+
+    `model_kwargs` are the keyword arguments (data and options) given to
+    `model_eas`, as for the MCMC run; `zerosumnormal` may be in there (it is
+    dropped for the centered model). Coefficient sites are copied unchanged;
+    u_B, u_A, u_S, c_region, ln_kappa_region, ln_kappa_station are computed
+    so that the centered model starts at the same function (same median).
+    """
+    from numpyro import handlers
+
+    RAW = {"deltaS_raw", "deltaB_raw", "deltaB_attn_raw", "c_region_raw",
+           "ln_kappa_region_raw", "ln_kappa_station_raw"}
+    glob = {k: v for k, v in init_nc.items() if k not in RAW}
+
+    kw_nc = {k: v for k, v in model_kwargs.items() if k != "save_means"}
+    kw_nc["save_ranef"] = True
+    kw_c = {k: v for k, v in model_kwargs.items() if k != "zerosumnormal"}
+    kw_c.update(save_means=True, save_ranef=False)
+
+    tr_nc = handlers.trace(handlers.substitute(handlers.seed(model_eas, 0), data=init_nc)).get_trace(**kw_nc)
+    val = lambda tr, k: tr[k]["value"]
+
+    out = dict(glob)
+    sub = dict(glob)
+    if "c_region" in tr_nc:
+        sub["c_region"] = val(tr_nc, "c_region")
+        out["c_region"] = val(tr_nc, "c_region")
+    tr_c = handlers.trace(handlers.substitute(handlers.seed(model_eas_centered, 0), data=sub)).get_trace(**kw_c)
+
+    out["u_B"] = val(tr_c, "mu_ev") + val(tr_nc, "deltaB")
+    out["u_S"] = val(tr_c, "mu_st") + val(tr_nc, "deltaS")
+    if "mu_att" in tr_c:
+        out["u_A"] = val(tr_c, "mu_att") + val(tr_nc, "deltaB_attn")
+
+    if "m_region" in tr_nc:
+        ln_kstar = jnp.log(val(tr_nc, "c_0_kappa_star"))
+        out["ln_kappa_region"] = ln_kstar + jnp.log(val(tr_nc, "m_region"))
+    if "m_station" in tr_nc:
+        ln_kstar = jnp.log(val(tr_nc, "c_0_kappa_star"))
+        if "m_region" in tr_nc:
+            X_id = np.asarray(model_kwargs["X_id"]).T
+            stat_id_, sreg_ = X_id[1].astype(int), X_id[2].astype(int)
+            stat_region = np.zeros(model_kwargs["X_stat"].shape[0], dtype=int)
+            stat_region[stat_id_] = sreg_
+            mean = out["ln_kappa_region"][stat_region]
+        else:
+            mean = ln_kstar
+        out["ln_kappa_station"] = mean + jnp.log(val(tr_nc, "m_station"))
+    return out
